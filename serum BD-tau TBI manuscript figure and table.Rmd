@@ -1,0 +1,3215 @@
+---
+title: "Serum brain-derived tau distinguishes acute neurotrauma diagnoses"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  error = FALSE
+)
+
+# Suppress package startup messages/warnings when loading libraries
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(pROC)
+  library(gtsummary)
+  library(broom)
+})
+
+```
+
+```{r library-setup}
+
+rm(list = ls())
+gc()
+
+library(readxl)
+library(data.table)
+library(openxlsx)
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(gtsummary)
+library(cardx)
+library(ggplot2)
+library(ggstatsplot)
+library(ggsignif)
+library(ggpubr)
+library(ggExtra)
+library(patchwork)
+library(e1071)
+library(lmerTest)
+library(knitr)
+library(purrr)
+
+```
+
+```{r load-data}
+
+load("~/Desktop/Projects/2025_05_19_TBI_SCI_BDTau/Processed_Data/tbi_sci_cntr_cleaned.RData")
+
+# matched baseline
+
+intersect_vars <- Reduce(intersect, list(
+  names(sci_match_demo_BL_cleaned),
+  names(tbi_match_demo_BL_cleaned)
+))
+
+match_baseline_cleaned <- rbindlist(
+  list(
+    sci_match_demo_BL_cleaned %>% dplyr::select(all_of(intersect_vars)),
+    tbi_match_demo_BL_cleaned %>% dplyr::select(all_of(intersect_vars))
+  ),
+  use.names = TRUE,
+  fill = FALSE
+) %>%
+  mutate(Cohort = factor(Cohort, levels = c("SCI", "Moderate TBI", "Severe TBI"))) %>%
+  mutate(Cohort2 = factor(case_when(Cohort %in% c("SCI") ~ Cohort, 
+                                    TRUE ~ "TBI"), 
+                          levels = c("SCI","TBI")))
+
+```
+
+```{r demographic-table}
+
+# Extended table 1
+
+extended_table1 <- serum_baseline_cleaned %>% 
+  dplyr::select(Age, Sex, mean_serum_BDTau, Cohort2) %>%
+  tbl_summary(
+    by = Cohort2,
+    type = list(all_continuous() ~ "continuous2"),
+    statistic = list(
+      all_continuous() ~ c("{mean} ({sd})", "{median} ({p25}, {p75})"),
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_continuous() ~ 1,
+      all_categorical() ~ c(0, 1)
+    ),
+    missing = "ifany",
+    missing_text = "(Missing)",
+    label = list(Age ~ "Age (years)",
+                 Sex ~ "Sex",
+                 mean_serum_BDTau ~ "BD-Tau (pg/mL)")
+  ) %>%
+  modify_header(label ~ "**Variable**") %>%
+  add_overall() %>%
+  add_p() %>%
+  bold_labels()
+
+extended_table1
+
+# Extended table 2
+
+extended_table2 <- csf_baseline_cleaned %>% 
+  dplyr::select(Age, Sex, mean_csf_BDTau, Cohort2) %>%
+  tbl_summary(
+    by = Cohort2,
+    type = list(all_continuous() ~ "continuous2"),
+    statistic = list(
+      all_continuous() ~ c("{mean} ({sd})", "{median} ({p25}, {p75})"),
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_continuous() ~ 1,
+      all_categorical() ~ c(0, 1)
+    ),
+    missing = "ifany",
+    missing_text = "(Missing)",
+    label = list(Age ~ "Age (years)",
+                 Sex ~ "Sex",
+                 mean_csf_BDTau ~ "BD-Tau (pg/mL)")
+  ) %>%
+  modify_header(label ~ "**Variable**") %>%
+  add_overall() %>%
+  add_p() %>%
+  bold_labels()
+
+extended_table2
+
+# Extended table 3
+
+extended_table3 <- match_baseline_cleaned %>% 
+  dplyr::select(Age, Sex, mean_serum_BDTau, mean_csf_BDTau, mean_BDTau_Ratio, mean_Hour_Diff, Cohort) %>%
+  tbl_summary(
+    by = Cohort,
+    type = list(all_continuous() ~ "continuous2"),
+    statistic = list(
+      all_continuous() ~ c("{mean} ({sd})", "{median} ({p25}, {p75})"),
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_continuous() ~ 2,
+      all_categorical() ~ c(0, 1)
+    ),
+    missing = "ifany",
+    missing_text = "(Missing)",
+    label = list(Age ~ "Age (years)",
+                 Sex ~ "Sex",
+                 mean_serum_BDTau ~ "serum BD-Tau (pg/mL)",
+                 mean_csf_BDTau ~ "csf BD-Tau (pg/mL)",
+                 mean_BDTau_Ratio ~ "serum/csf BD-Tau ratio")
+  ) %>%
+  modify_header(label ~ "**Variable**") %>%
+  add_overall() %>%
+  add_p() %>%
+  bold_labels()
+
+extended_table3
+
+```
+
+```{r figure 1}
+
+library(rstatix)
+library(ggpubr)
+library(gt) 
+library(knitr)
+library(kableExtra)
+
+integrated_color_palette <- c(
+  "Control" = "grey50",
+  "A SCI" = "#007382",
+  "B SCI" = "#019787",
+  "C/D SCI" = "#82e1cd",
+  "Mild TBI" = "#f8dda4",
+  "Moderate TBI" = "#f9a03f",
+  "Severe TBI" = "#d45113"
+)
+
+cntr_tbi_color_palette <- c(
+  "Control" = "grey50", 
+  "Moderate TBI" = "#f9a03f",
+  "Severe TBI" = "#d45113"
+  )
+
+cntr_sci_color_palette <- c(
+  "Control" = "grey50", 
+  "A SCI" = "#007382",
+  "B SCI" = "#019787",
+  "C/D SCI" = "#82e1cd"
+  )
+
+integrated_3color_palette <- c(
+  "Control" = "grey50",
+  "SCI" = "#07668d",
+  "TBI" = "#813405"
+)
+
+asia_a_ids <- sci_serum_demo_BL_cleaned[!is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA == "A", ]$Subject.ID
+asia_b_ids <- sci_serum_demo_BL_cleaned[!is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA == "B", ]$Subject.ID
+asia_cd_ids <- sci_serum_demo_BL_cleaned[!is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA %in% c("C","D"), ]$Subject.ID
+
+serum_df <- serum_baseline_cleaned %>%
+  filter(Cohort %in% c("Control","SCI","Mild TBI","Moderate TBI","Severe TBI")) %>%
+  filter(!is.na(Cohort2), !is.na(mean_serum_log2_BDTau)) %>%
+  mutate(
+    Cohort2 = factor(Cohort2, levels = names(integrated_3color_palette))) %>%
+  mutate(
+    Cohort3 = case_when(
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_a_ids  ~ "A SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_b_ids  ~ "B SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ as.character(Cohort)
+    ),
+    Cohort3 = factor(
+      Cohort3,
+      levels = c("Control", "C/D SCI", "B SCI", "A SCI", "Mild TBI", "Moderate TBI", "Severe TBI")
+    )
+  )
+
+# ==================================================
+# General Control/SCI/TBI
+# ==================================================
+
+# get summary by cohort
+
+serum_summary_by_cohort <- serum_df %>%
+  group_by(Cohort2) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_serum_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_serum_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_serum_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_serum_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_serum_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_serum_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_serum_BDTau, na.rm = TRUE)
+  )
+
+fc_tbi_sci <- serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "TBI"] /
+              serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "SCI"]
+
+fc_tbi_sci
+
+fc_tbi_cntr <- serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "TBI"] /
+              serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "Control"]
+
+fc_tbi_cntr
+
+fc_sci_cntr <- serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "SCI"] /
+              serum_summary_by_cohort$median_BDTau[serum_summary_by_cohort$Cohort2 == "Control"]
+
+fc_sci_cntr
+
+# comparison
+
+kw_res <- serum_df %>% kruskal_test(mean_serum_log2_BDTau ~ Cohort2)
+
+H <- unname(kw_res[["statistic"]])
+df <- unname(kw_res[["df"]])
+p <- unname(kw_res[["p"]]) 
+
+H; df; p
+
+dunn_res <- serum_df %>%
+  dunn_test(mean_serum_log2_BDTau ~ Cohort2, p.adjust.method = "BH") %>%
+  mutate(
+    p.adj.sci = format(p.adj, scientific = TRUE, digits = 3)
+  ) %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+dunn_report <- dunn_res %>%
+  dplyr::select(group1, group2, statistic, p, p.adj) %>%
+  dplyr::mutate(
+    z = statistic,
+    p_raw = formatC(p, format = "e", digits = 2),
+    p_bonf = formatC(p.adj, format = "e", digits = 2)
+  ) %>%
+  dplyr::select(group1, group2, z, p_raw, p_bonf)
+
+dunn_report
+
+y_max <- max(serum_df$mean_serum_log2_BDTau, na.rm = TRUE)
+step  <- 0.04 * y_max
+dunn_res <- dunn_res %>%
+  mutate(y.position = y_max + row_number() * step)
+
+p_serum <- ggplot(serum_df, aes(x = Cohort2, y = mean_serum_log2_BDTau, fill = Cohort2, color = Cohort2)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  # median "tick"
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  # palettes
+  scale_fill_manual(values = integrated_3color_palette, guide = "none") +
+  scale_color_manual(values = integrated_3color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  # pairwise p-values (stars); hide non-sig if you want
+  ggpubr::stat_pvalue_manual(
+    dunn_res,
+    label = "p.adj.signif",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    step.increase = 0.0,
+    bracket.size = 0.4,
+    size = 6,
+    hide.ns = TRUE
+  ) +
+  # Omnibus p-value annotation at the top-right
+  annotate(
+    "text",
+    x = Inf, y = max(dunn_res$y.position, na.rm = TRUE) + 0.8 * step,
+    label = paste0("Kruskal-Wallis p = ", signif(kw_res$p, 3)),
+    hjust = 1, vjust = 0, size = 3.6
+  ) + 
+  ylim(1,12.5)
+
+dunn_res %>%
+  mutate(
+    p_formatted = ifelse(p < 0.001, 
+                        format(p, scientific = TRUE, digits = 2),
+                        sprintf("%.3f", p)),
+    p.adj_formatted = ifelse(p.adj < 0.001,
+                            format(p.adj, scientific = TRUE, digits = 2),
+                            sprintf("%.3f", p.adj))
+  ) %>%
+  select(group1, group2, n1, n2, statistic, p_formatted, p.adj_formatted, p.adj.signif) %>%
+  kable(
+    col.names = c("Group 1", "Group 2", "N1", "N2", "Statistic", "P-value", "Adjusted P", "Sig."),
+    caption = "Pairwise Dunn's Test Results for Serum BD-Tau (log2) by Cohort",
+    align = c('l', 'l', 'c', 'c', 'c', 'c', 'c', 'c')
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "left"
+  )
+ 
+p_serum # FIGURE 1A
+
+#> p_bd_zoom <- p_bd +
+#>   ggforce::facet_zoom(y = mean_serum_log2_BDTau <= 50) +
+#>   labs(subtitle = "Zoomed-in view for BD-Tau ≤ 50 pg/mL") +
+#>   theme(
+#>     panel.border = element_rect(color = "black", linewidth = 0.5)
+#>     # strip.background = element_blank()
+#>   )
+
+# ==================================================
+# Detailed Control/SCI/TBI
+# ==================================================
+
+# get summary by cohort
+serum_df <- serum_df %>% 
+  filter(!is.na(Cohort3))
+
+summary_by_cohort <- serum_df %>%
+  group_by(Cohort3) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_serum_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_serum_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_serum_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_serum_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_serum_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_serum_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_serum_BDTau, na.rm = TRUE)
+  )
+
+# comparison
+
+kw_res <- serum_df %>% kruskal_test(mean_serum_log2_BDTau ~ Cohort3)
+H <- unname(kw_res[["statistic"]])
+df <- unname(kw_res[["df"]])
+p <- unname(kw_res[["p"]]) 
+
+H; df; p
+
+dunn_res <- serum_df %>%
+  dunn_test(mean_serum_log2_BDTau ~ Cohort3, p.adjust.method = "BH") %>%
+  mutate(
+    p.adj.sci = format(p.adj, scientific = TRUE, digits = 3)
+  ) %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+dunn_report <- dunn_res %>%
+  dplyr::select(group1, group2, statistic, p, p.adj) %>%
+  dplyr::mutate(
+    z = statistic,
+    p_raw = formatC(p, format = "e", digits = 2),
+    p_bonf = formatC(p.adj, format = "e", digits = 2)
+  ) %>%
+  dplyr::select(group1, group2, z, p_raw, p_bonf)
+
+dunn_report
+
+y_max <- max(serum_df$mean_serum_log2_BDTau, na.rm = TRUE)
+step  <- 0.04 * y_max
+dunn_res <- dunn_res %>%
+  mutate(y.position = y_max + row_number() * step)
+
+p_serum_detail <- ggplot(serum_df, aes(x = Cohort3, y = mean_serum_log2_BDTau, fill = Cohort3, color = Cohort3)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  # median "tick"
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  # palettes
+  scale_fill_manual(values = integrated_color_palette, guide = "none") +
+  scale_color_manual(values = integrated_color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  # pairwise p-values (stars); hide non-sig if you want
+  ggpubr::stat_pvalue_manual(
+    dunn_res,
+    label = "p.adj.signif",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    step.increase = 0.0,
+    bracket.size = 0.4,
+    size = 6,
+    hide.ns = TRUE
+  ) +
+  # Omnibus p-value annotation at the top-right
+  annotate(
+    "text",
+    x = Inf, y = max(dunn_res$y.position, na.rm = TRUE) + 0.8 * step,
+    label = paste0("Kruskal-Wallis p = ", signif(kw_res$p, 3)),
+    hjust = 1, vjust = 0, size = 3.6
+  ) + 
+  ylim(1,12.5)
+
+dunn_res %>%
+  mutate(
+    p_formatted = ifelse(p < 0.001, 
+                        format(p, scientific = TRUE, digits = 3),
+                        sprintf("%.3f", p)),
+    p.adj_formatted = ifelse(p.adj < 0.001,
+                            format(p.adj, scientific = TRUE, digits = 3),
+                            sprintf("%.3f", p.adj))
+  ) %>%
+  select(group1, group2, n1, n2, statistic, p_formatted, p.adj_formatted, p.adj.signif) %>%
+  kable(
+    col.names = c("Group 1", "Group 2", "N1", "N2", "Statistic", "P-value", "Adjusted P", "Sig."),
+    caption = "Pairwise Dunn's Test Results for Serum BD-Tau (log2) by Cohort",
+    align = c('l', 'l', 'c', 'c', 'c', 'c', 'c', 'c')
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "left"
+  )
+
+p_serum_detail
+
+library(patchwork)
+
+# Combine plots with publication formatting
+fig_combined <- p_serum + p_serum_detail + 
+  plot_layout(widths = c(1, 2)) +
+  plot_annotation(
+    # tag_levels = 'A',
+    theme = theme(
+      plot.tag = element_text(size = 14, face = "bold")
+    )
+  )
+
+fig_combined
+
+```
+
+```{r figure 2a}
+
+# Spearman Correlation: Serum vs CSF BD-Tau
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+library(gt)
+library(writexl)
+
+# ============================================
+# PREPARE MATCHED COHORT DATA
+# ============================================
+
+match_df <- match_baseline_cleaned %>%
+  filter(!is.na(Cohort2), 
+         !is.na(mean_serum_BDTau), 
+         !is.na(mean_csf_BDTau)) %>%
+  mutate(
+    Cohort2 = factor(Cohort2, levels = c("SCI", "TBI")),
+    Cohort3 = case_when(
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_a_ids  ~ "A SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_b_ids  ~ "B SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ as.character(Cohort)
+    ),
+    Cohort3 = factor(
+      Cohort3,
+      levels = c("C/D SCI", "B SCI", "A SCI", "Moderate TBI", "Severe TBI")
+    )
+  )
+
+# ============================================
+# SPEARMAN CORRELATION ANALYSIS
+# ============================================
+
+# Helper function to calculate Spearman CI using Fisher's Z transformation
+spearman_ci <- function(x, y, conf.level = 0.95, digits = 2) {
+  test_result <- cor.test(x, y, method = "spearman", exact = FALSE)
+  rho <- as.numeric(test_result$estimate)
+  n <- sum(complete.cases(x, y))
+
+  # Fisher's Z transformation
+  z <- 0.5 * log((1 + rho) / (1 - rho))
+  se <- 1 / sqrt(n - 3)
+  z_crit <- qnorm((1 + conf.level) / 2)
+
+  # CI on Z scale
+  z_lower <- z - z_crit * se
+  z_upper <- z + z_crit * se
+
+  # Transform back
+  ci_lower <- (exp(2 * z_lower) - 1) / (exp(2 * z_lower) + 1)
+  ci_upper <- (exp(2 * z_upper) - 1) / (exp(2 * z_upper) + 1)
+
+  list(
+    estimate = rho,
+    conf.int = c(ci_lower, ci_upper),
+    p.value = test_result$p.value,                         # numeric (for stats)
+    p.value_sci = formatC(test_result$p.value,             # formatted (for reporting)
+                          format = "e",
+                          digits = digits),
+    n = n
+  )
+}
+
+
+# Overall correlation
+cor_overall <- spearman_ci(match_df$mean_serum_BDTau, 
+                           match_df$mean_csf_BDTau)
+
+# By cohort
+
+cor_sci <- spearman_ci(
+  match_df$mean_serum_BDTau[match_df$Cohort2 == "SCI"],
+  match_df$mean_csf_BDTau[match_df$Cohort2 == "SCI"]
+)
+
+cor_tbi <- spearman_ci(
+  match_df$mean_serum_BDTau[match_df$Cohort2 == "TBI"],
+  match_df$mean_csf_BDTau[match_df$Cohort2 == "TBI"]
+)
+
+# Summary statistics by cohort
+
+correlation_by_cohort <- match_df %>%
+  group_by(Cohort2) %>%
+  summarise(
+    N = n(),
+    Serum_Mean = mean(mean_serum_BDTau, na.rm = TRUE),
+    Serum_SD = sd(mean_serum_BDTau, na.rm = TRUE),
+    Serum_Median = median(mean_serum_BDTau, na.rm = TRUE),
+    CSF_Mean = mean(mean_csf_BDTau, na.rm = TRUE),
+    CSF_SD = sd(mean_csf_BDTau, na.rm = TRUE),
+    CSF_Median = median(mean_csf_BDTau, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(correlation_by_cohort)
+
+# Summary by subgroup
+correlation_by_subgroup <- match_df %>%
+  filter(!is.na(Cohort3)) %>%
+  group_by(Cohort3) %>%
+  summarise(
+    N = n(),
+    Serum_Mean = mean(mean_serum_BDTau, na.rm = TRUE),
+    CSF_Mean = mean(mean_csf_BDTau, na.rm = TRUE),
+    Spearman_rho = cor(mean_serum_BDTau, mean_csf_BDTau, method = "spearman"),
+    .groups = "drop"
+  )
+
+print(correlation_by_subgroup)
+
+# ============================================
+# PUBLICATION TABLE
+# ============================================
+
+# Create comprehensive correlation table
+correlation_summary <- data.frame(
+  Group = c("Overall", "SCI", "TBI"),
+  N = c(cor_overall$n, cor_sci$n, cor_tbi$n),
+  Spearman_rho = c(cor_overall$estimate, cor_sci$estimate, cor_tbi$estimate),
+  CI_Lower = c(cor_overall$conf.int[1], cor_sci$conf.int[1], cor_tbi$conf.int[1]),
+  CI_Upper = c(cor_overall$conf.int[2], cor_sci$conf.int[2], cor_tbi$conf.int[2]),
+  P_value = c(cor_overall$p.value, cor_sci$p.value, cor_tbi$p.value)
+)
+
+# Format for publication
+correlation_summary_formatted <- correlation_summary %>%
+  mutate(
+    `Spearman ρ (95% CI)` = sprintf("%.2f (%.2f-%.2f)", 
+                                    Spearman_rho, CI_Lower, CI_Upper),
+    `P-value` = ifelse(P_value < 0.001, "<0.001", 
+                       sprintf("%.3f", P_value))
+  ) %>%
+  dplyr::select(Group, N, `Spearman ρ (95% CI)`, `P-value`)
+
+print(correlation_summary_formatted)
+
+# Create gt table
+correlation_gt <- correlation_summary_formatted %>%
+  gt() %>%
+  tab_header(
+    title = md("**Serum-CSF BD-Tau Correlation**"),
+    subtitle = "Matched Cohort Analysis (Baseline)"
+  ) %>%
+  cols_label(
+    Group = "Group",
+    N = "N",
+    `Spearman ρ (95% CI)` = "Spearman ρ (95% CI)",
+    `P-value` = "P-value"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.size = 14
+  ) %>%
+  tab_footnote(
+    footnote = "Spearman rank correlation on raw BD-Tau values (pg/mL)",
+    locations = cells_column_labels(columns = `Spearman ρ (95% CI)`)
+  )
+
+# ============================================
+# VISUALIZATION: SCATTER PLOT
+# ============================================
+
+# Define colors
+cohort_colors <- c("SCI" = "#07668d", "TBI" = "#813405")
+
+# Main scatter plot with log scales
+p_correlation <- ggplot(match_df, aes(x = mean_serum_BDTau, y = mean_csf_BDTau)) +
+  geom_point(aes(color = Cohort2), shape = 1, size = 2, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed", 
+              se = TRUE, alpha = 0.2, linewidth = 1) +
+  scale_color_manual(values = cohort_colors) +
+  scale_x_continuous(trans = "log10", 
+                     breaks = c(10, 30, 100, 300, 1000)) +
+  scale_y_continuous(trans = "log10",
+                     breaks = c(100, 300, 1000, 3000, 10000, 30000)) +
+  annotation_logticks(sides = "bl") +
+  labs(
+    title = "Serum-CSF BD-Tau Correlation",
+    x = "Serum BD-Tau (pg/mL)",
+    y = "CSF BD-Tau (pg/mL)",
+    color = "Cohort"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    #legend.background = element_rect(fill = "white", color = "black"),
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10)
+  )
+
+print(p_correlation)
+
+# Faceted by cohort
+p_by_cohort <- ggplot(match_df %>% mutate(Cohort2 = factor(Cohort2, levels = c("TBI","SCI"))), aes(x = mean_serum_BDTau, y = mean_csf_BDTau)) +
+  geom_point(aes(color = Cohort2), shape = 1, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed",
+              se = TRUE, alpha = 0.2, linewidth = 1) +
+  facet_wrap(~Cohort2, scales = "free") +
+  scale_color_manual(values = cohort_colors) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log10") +
+  annotation_logticks(sides = "bl") +
+  labs(
+    title = NULL,
+    x = "Serum BD-Tau (pg/mL)",
+    y = "CSF BD-Tau (pg/mL)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold", size = 11),
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_by_cohort)
+
+```
+
+```{r figure 2 bcde}
+
+# ============================================
+# Matched Serum/CSF Cohort Visualization
+# ============================================
+
+library(rstatix)
+library(ggpubr)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+# Color palette
+integrated_color_palette <- c(
+  "Control" = "grey50",
+  "A SCI" = "#007382",
+  "B SCI" = "#019787",
+  "C/D SCI" = "#82e1cd",
+  "B-D SCI" = "#82e1cd",
+  "Mild TBI" = "#f8dda4",
+  "Moderate TBI" = "#f9a03f",
+  "Severe TBI" = "#d45113"
+)
+
+cntr_tbi_color_palette <- c(
+  "Control" = "grey50", 
+  "Moderate TBI" = "#f9a03f",
+  "Severe TBI" = "#d45113"
+  )
+
+cntr_sci_color_palette <- c(
+  "Control" = "grey50", 
+  "A SCI" = "#007382",
+  "B SCI" = "#019787",
+  "C/D SCI" = "#82e1cd"
+  )
+
+integrated_3color_palette <- c(
+  "Control" = "grey50",
+  "SCI" = "#07668d",
+  "TBI" = "#813405"
+)
+
+match_df <- match_baseline_cleaned %>%
+  filter(!is.na(Cohort2), !is.na(mean_serum_log2_BDTau)) %>%
+  mutate(
+    Cohort2 = factor(Cohort2, levels = names(integrated_3color_palette))) %>%
+  mutate(
+    Cohort3 = case_when(
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_a_ids  ~ "A SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_b_ids  ~ "B SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ as.character(Cohort)
+    ),
+    Cohort3 = factor(
+      Cohort3,
+      levels = c("Control", "C/D SCI", "B SCI", "A SCI", "Mild TBI", "Moderate TBI", "Severe TBI")
+    ),
+    Cohort4 = factor(case_when(
+      Cohort3 %in% c("B SCI", "C/D SCI") ~ "B-D SCI",
+      Cohort3 == "A SCI" ~ "A SCI",
+      TRUE ~ Cohort3),
+      levels = c("Control","B-D SCI","A SCI","Moderate TBI","Severe TBI"))
+  )
+
+csf_df <- csf_baseline_cleaned %>%
+  filter(!is.na(Cohort2), !is.na(mean_csf_log2_BDTau)) %>%
+  mutate(
+    Cohort2 = factor(Cohort2, levels = names(integrated_3color_palette))) %>%
+  mutate(
+    Cohort3 = case_when(
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_a_ids  ~ "A SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_b_ids  ~ "B SCI",
+      Cohort2 == "SCI" & !is.na(Subject.ID) & Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ as.character(Cohort)
+    ),
+    Cohort3 = factor(
+      Cohort3,
+      levels = c("Control", "C/D SCI", "B SCI", "A SCI", "Mild TBI", "Moderate TBI", "Severe TBI")
+    ),
+    Cohort4 = factor(case_when(
+      Cohort3 %in% c("B SCI", "C/D SCI") ~ "B-D SCI",
+      Cohort3 == "A SCI" ~ "A SCI",
+      TRUE ~ Cohort3),
+      levels = c("Control","B-D SCI","A SCI","Moderate TBI","Severe TBI"))
+  )
+
+# ============================================
+# DATA PREPARATION
+# ============================================
+
+# Filter to only complete cases for 2-group analysis
+match_df_2group <- match_df %>%
+  filter(!is.na(Cohort2), 
+         !is.na(mean_serum_log2_BDTau),
+         !is.na(mean_csf_log2_BDTau)) %>%
+  mutate(Cohort2 = factor(Cohort2, levels = c("SCI", "TBI")))
+
+# Check sample sizes
+cat("Sample sizes for 2-group analysis:\n")
+print(table(match_df_2group$Cohort2))
+cat("\n")
+
+fc_df <- match_df_2group %>%
+  group_by(Cohort2) %>%
+  summarise(
+    serum_median = median(mean_serum_BDTau, na.rm = TRUE),
+    csf_median   = median(mean_csf_BDTau,   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  summarise(
+    serum_FC = serum_median[Cohort2 == "TBI"] /
+               serum_median[Cohort2 == "SCI"],
+    csf_FC = csf_median[Cohort2 == "TBI"] /
+               csf_median[Cohort2 == "SCI"],
+    serum_log2FC = log2(serum_FC),
+    csf_log2FC = log2(csf_FC)
+  )
+
+fc_df
+
+# Filter for 5-group analysis
+match_df_5group <- match_df %>%
+  filter(!is.na(Cohort3),
+         !is.na(mean_serum_log2_BDTau),
+         !is.na(mean_csf_log2_BDTau)) %>%
+  mutate(Cohort3 = factor(Cohort3, 
+                          levels = c("C/D SCI", "B SCI", "A SCI", 
+                                     "Moderate TBI", "Severe TBI")),
+         Cohort4 = factor(Cohort4, 
+                          levels = c("B-D SCI","A SCI", "Moderate TBI", "Severe TBI")))
+
+# Check sample sizes
+cat("Sample sizes for 5-group analysis:\n")
+print(table(match_df_5group$Cohort3))
+cat("\n")
+
+# ============================================
+# FIGURE 1: SERUM BD-TAU
+# ============================================
+
+# --------------------------------------------
+# Panel A: Serum SCI vs TBI (2-group)
+# --------------------------------------------
+
+# Get summary by cohort
+serum_match_summary_2group <- match_df_2group %>%
+  group_by(Cohort2) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_serum_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_serum_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_serum_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_serum_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_serum_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_serum_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_serum_BDTau, na.rm = TRUE)
+  )
+
+# Statistical comparison - Mann-Whitney U test
+wilcox_res_serum <- match_df_2group %>% 
+  wilcox_test(mean_serum_log2_BDTau ~ Cohort2, alternative = "two.sided") %>%
+  add_significance("p")
+
+W <- unname(wilcox_res_serum$statistic)
+p <- wilcox_res_serum$p
+
+W; p
+
+y_max_serum_2g <- max(match_df_2group$mean_serum_log2_BDTau, na.rm = TRUE)
+
+# Panel A: Serum SCI vs TBI
+p_serum_2group <- ggplot(match_df_2group, aes(x = Cohort2, y = mean_serum_log2_BDTau, 
+                                              fill = Cohort2, color = Cohort2)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, 
+               outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  scale_fill_manual(values = integrated_3color_palette, guide = "none") +
+  scale_color_manual(values = integrated_3color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  stat_compare_means(
+    comparisons = list(c("SCI", "TBI")),
+    method = "wilcox.test",
+    label = "p.signif",
+    tip.length = 0.02,
+    bracket.size = 0.5,
+    size = 6
+  ) +
+  annotate(
+    "text",
+    x = 1.5, y = y_max_serum_2g + 0.5,
+    label = paste0("Mann-Whitney U p = ", signif(wilcox_res_serum$p, 3)),
+    size = 3.6
+  ) + 
+  ylim(1, 12.5)
+
+# --------------------------------------------
+# Panel B: Serum Subgroups (5-group)
+# --------------------------------------------
+
+# Get summary by subgroup
+serum_match_summary_3group <- match_df %>%
+  group_by(Cohort) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_serum_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_serum_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_serum_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_serum_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_serum_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_serum_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_serum_BDTau, na.rm = TRUE)
+  )
+
+# Statistical comparison
+kw_res_serum_3g <- match_df %>% 
+  kruskal_test(mean_serum_log2_BDTau ~ Cohort)
+
+dunn_res_serum_3g <- match_df %>%
+  dunn_test(mean_serum_log2_BDTau ~ Cohort, p.adjust.method = "BH") %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+# Get summary by subgroup
+serum_match_summary_5group <- match_df_5group %>%
+  group_by(Cohort3) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_serum_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_serum_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_serum_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_serum_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_serum_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_serum_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_serum_BDTau, na.rm = TRUE)
+  )
+
+# Statistical comparison
+kw_res_serum_5g <- match_df_5group %>% 
+  kruskal_test(mean_serum_log2_BDTau ~ Cohort3)
+
+H <- unname(kw_res_serum_5g[["statistic"]])
+df <- unname(kw_res_serum_5g[["df"]])
+p <- unname(kw_res_serum_5g[["p"]]) 
+
+H; df; p
+
+dunn_res_serum_5g <- match_df_5group %>%
+  dunn_test(mean_serum_log2_BDTau ~ Cohort3, p.adjust.method = "BH") %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+dunn_report <- dunn_res_serum_5g %>%
+  dplyr::select(group1, group2, statistic, p, p.adj) %>%
+  dplyr::mutate(
+    z = statistic,
+    p_raw = formatC(p, format = "e", digits = 2),
+    p_bonf = formatC(p.adj, format = "e", digits = 2)
+  ) %>%
+  dplyr::select(group1, group2, z, p_raw, p_bonf)
+
+dunn_report
+
+y_max_serum_5g <- max(match_df_5group$mean_serum_log2_BDTau, na.rm = TRUE)
+step_serum_5g  <- 0.04 * y_max_serum_5g
+dunn_res_serum_5g <- dunn_res_serum_5g %>%
+  mutate(y.position = y_max_serum_5g + row_number() * step_serum_5g)
+
+# Panel B: Serum Subgroups
+p_serum_5group <- ggplot(match_df_5group, aes(x = Cohort3, y = mean_serum_log2_BDTau, 
+                                              fill = Cohort3, color = Cohort3)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, 
+               outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  scale_fill_manual(values = integrated_color_palette, guide = "none") +
+  scale_color_manual(values = integrated_color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  ggpubr::stat_pvalue_manual(
+    dunn_res_serum_5g,
+    label = "p.adj.signif",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    step.increase = 0.0,
+    bracket.size = 0.4,
+    size = 6,
+    hide.ns = TRUE
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = max(dunn_res_serum_5g$y.position, na.rm = TRUE) + 0.8 * step_serum_5g,
+    label = paste0("Kruskal-Wallis p = ", signif(kw_res_serum_5g$p, 3)),
+    hjust = 1, vjust = 0, size = 3.6
+  ) + 
+  ylim(1, 12.5)
+
+# Combine SERUM panels
+fig_serum_matched <- p_serum_2group + p_serum_5group +
+  plot_layout(widths = c(1, 2)) +
+  plot_annotation(
+    # tag_levels = 'A',
+    # title = "Matched Cohort: Serum BD-Tau",
+    theme = theme(
+      plot.tag = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 15, face = "bold", hjust = 0.5)
+    )
+  )
+
+# ============================================
+# FIGURE 2: CSF BD-TAU
+# ============================================
+
+# --------------------------------------------
+# Panel A: CSF SCI vs TBI (2-group)
+# --------------------------------------------
+
+# Get summary by cohort
+csf_match_summary_2group <- match_df_2group %>%
+  group_by(Cohort2) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_csf_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_csf_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_csf_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_csf_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_csf_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_csf_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_csf_BDTau, na.rm = TRUE)
+  )
+
+# Statistical comparison
+wilcox_res_csf <- match_df_2group %>% 
+  wilcox_test(mean_csf_log2_BDTau ~ Cohort2, alternative = "two.sided") %>%
+  add_significance("p")
+
+W <- unname(wilcox_res_csf$statistic)
+p <- wilcox_res_csf$p
+
+W; p
+
+y_max_csf_2g <- max(match_df_2group$mean_csf_log2_BDTau, na.rm = TRUE)
+
+# Panel A: CSF SCI vs TBI
+p_csf_2group <- ggplot(match_df_2group, aes(x = Cohort2, y = mean_csf_log2_BDTau, 
+                                            fill = Cohort2, color = Cohort2)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, 
+               outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  scale_fill_manual(values = integrated_3color_palette, guide = "none") +
+  scale_color_manual(values = integrated_3color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  stat_compare_means(
+    comparisons = list(c("SCI", "TBI")),
+    method = "wilcox.test",
+    label = "p.signif",
+    tip.length = 0.02,
+    bracket.size = 0.5,
+    size = 6
+  ) +
+  annotate(
+    "text",
+    x = 1.5, y = y_max_csf_2g + 0.5,
+    label = paste0("Mann-Whitney U p = ", signif(wilcox_res_csf$p, 3)),
+    size = 3.6
+  ) + 
+  ylim(1, 12.5)
+
+# --------------------------------------------
+# Panel B: CSF Subgroups (5-group)
+# --------------------------------------------
+
+# Get summary by subgroup
+csf_match_summary_5group <- match_df_5group %>%
+  group_by(Cohort3) %>%
+  summarise(
+    n = n(),
+    mean_BDTau = mean(mean_csf_BDTau, na.rm = TRUE),
+    sd_BDTau = sd(mean_csf_BDTau, na.rm = TRUE),
+    median_BDTau = median(mean_csf_BDTau, na.rm = TRUE),
+    p25_BDTau = quantile(mean_csf_BDTau, 0.25, na.rm = TRUE),
+    p75_BDTau = quantile(mean_csf_BDTau, 0.75, na.rm = TRUE),
+    min_BDTau = min(mean_csf_BDTau, na.rm = TRUE),
+    max_BDTau = max(mean_csf_BDTau, na.rm = TRUE)
+  )
+
+# Statistical comparison
+kw_res_csf_4g <- match_df_5group %>% 
+  kruskal_test(mean_csf_log2_BDTau ~ Cohort4)
+
+dunn_res_csf_4g <- match_df_5group %>%
+  dunn_test(mean_csf_log2_BDTau ~ Cohort4, p.adjust.method = "BH") %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+kw_res_csf_5g <- match_df_5group %>% 
+  kruskal_test(mean_csf_log2_BDTau ~ Cohort3)
+
+H <- unname(kw_res_csf_5g[["statistic"]])
+df <- unname(kw_res_csf_5g[["df"]])
+p <- unname(kw_res_csf_5g[["p"]]) 
+
+H; df; p
+
+dunn_res_csf_5g <- match_df_5group %>%
+  dunn_test(mean_csf_log2_BDTau ~ Cohort3, p.adjust.method = "BH") %>%
+  add_significance("p.adj") %>%
+  arrange(group1, group2)
+
+dunn_report <- dunn_res_csf_5g %>%
+  dplyr::select(group1, group2, statistic, p, p.adj) %>%
+  dplyr::mutate(
+    z = statistic,
+    p_raw = formatC(p, format = "e", digits = 2),
+    p_bonf = formatC(p.adj, format = "e", digits = 2)
+  ) %>%
+  dplyr::select(group1, group2, z, p_raw, p_bonf)
+
+dunn_report
+
+y_max_csf_5g <- max(match_df_5group$mean_csf_log2_BDTau, na.rm = TRUE)
+step_csf_5g  <- 0.04 * y_max_csf_5g
+dunn_res_csf_5g <- dunn_res_csf_5g %>%
+  mutate(y.position = y_max_csf_5g + row_number() * step_csf_5g)
+
+# Panel B: CSF Subgroups
+p_csf_5group <- ggplot(match_df_5group, aes(x = Cohort3, y = mean_csf_log2_BDTau, 
+                                            fill = Cohort3, color = Cohort3)) +
+  geom_boxplot(width = 0.62, alpha = 0.6, outlier.shape = 3, 
+               outlier.color = "red", color = "black") +
+  geom_jitter(width = 0.15, size = 1.2, shape = 1, alpha = 0.65, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, size = 0.45, color = "black") +
+  scale_fill_manual(values = integrated_color_palette, guide = "none") +
+  scale_color_manual(values = integrated_color_palette, guide = "none") +
+  labs(x = NULL, y = "log2(BD-Tau)", title = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
+  ggpubr::stat_pvalue_manual(
+    dunn_res_csf_5g,
+    label = "p.adj.signif",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    step.increase = 0.0,
+    bracket.size = 0.4,
+    size = 6,
+    hide.ns = TRUE
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = max(dunn_res_csf_5g$y.position, na.rm = TRUE) + 0.8 * step_csf_5g,
+    label = paste0("Kruskal-Wallis p = ", signif(kw_res_csf_5g$p, 3)),
+    hjust = 1, vjust = 0, size = 3.6
+  ) + 
+  ylim(1, 12.5)
+
+# Combine CSF panels
+fig_csf_matched <- p_csf_2group + p_csf_5group +
+  plot_layout(widths = c(1, 2)) +
+  plot_annotation(
+    # tag_levels = 'A',
+    # title = "Matched Cohort: CSF BD-Tau",
+    theme = theme(
+      plot.tag = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 15, face = "bold", hjust = 0.5)
+    )
+  )
+
+# ============================================
+# DISPLAY FIGURES
+# ============================================
+
+print(fig_serum_matched)
+print(fig_csf_matched)
+
+combined_fig <- p_serum_2group + p_serum_5group + 
+  p_csf_2group + p_csf_5group +
+  plot_layout(widths = c(1, 2), 
+              heights = c(1, 1)) +
+  plot_annotation(
+    # tag_levels = 'A',
+    title = NULL,
+    theme = theme(
+      plot.tag = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 15, face = "bold", hjust = 0.5)
+    )
+  )
+
+```
+
+```{r figure 2f}
+
+# ============================================
+# ROC Analysis: Matched Cohort Only
+# TBI vs SCI (Overall and Subgroups)
+# INCLUDING MODERATE TBI
+# Serum and CSF BD-Tau
+# ============================================
+
+library(pROC)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gtsummary)
+library(gt)
+library(writexl)
+library(patchwork)
+
+# ============================================
+# PREPARE DATA - MATCHED COHORT ONLY
+# ============================================
+
+# Filter to matched cohort with complete data
+match_roc_data <- match_df %>%
+  filter(!is.na(Cohort2), 
+         !is.na(Cohort3),
+         !is.na(mean_serum_BDTau),
+         !is.na(mean_csf_BDTau)) %>%
+  mutate(
+    Cohort2 = factor(Cohort2, levels = c("SCI", "TBI")),
+    Cohort3 = factor(Cohort3, 
+                     levels = c("A SCI", "B SCI", "C/D SCI", 
+                                "Moderate TBI", "Severe TBI")),
+    log2_serum_BDTau = log2(mean_serum_BDTau),
+    z_log2_serum_BDTau = as.numeric(scale(log2_serum_BDTau)),
+    log2_csf_BDTau = log2(mean_csf_BDTau),
+    z_log2_csf_BDTau = as.numeric(scale(log2_csf_BDTau))
+  )
+
+# Check sample sizes
+cat("\n=== MATCHED COHORT SAMPLE SIZES (INCLUDING MODERATE TBI) ===\n")
+cat("\n2-Group (Cohort2):\n")
+print(table(match_roc_data$Cohort2))
+cat("\n5-Group (Cohort3):\n")
+print(table(match_roc_data$Cohort3))
+cat("\n")
+
+### Serum
+
+# =============================================
+# Adjusted Logistic ROC: BD-Tau ~ Age + Sex
+# =============================================
+
+# Helper to automate section creation
+
+run_pairwise_roc_section <- function(data, cohort_var, pairs, section_label,
+                                     n_folds = 5, n_boot = 1000, seed = 42) {
+  set.seed(seed)
+  
+  purrr::map_dfr(pairs, function(pair) {
+    df <- data %>%
+      rename(cohort = {{cohort_var}}) %>%
+      filter(cohort %in% pair) %>%
+      mutate(
+        outcome = as.numeric(cohort == pair[2]),
+        Sex = factor(Sex, levels = c("Male", "Female"))
+      ) %>%
+      drop_na(z_log2_serum_BDTau, Age, Sex, outcome)
+    
+    if (length(unique(df$outcome)) < 2 || length(unique(df$Sex)) < 2) {
+      return(tibble(
+        Section = section_label,
+        Comparison = paste(pair[2], "vs.", pair[1]),
+        AUC = NA, CI_Lower = NA, CI_Upper = NA,
+        N_Reference = sum(df$outcome == 0),
+        N_Positive = sum(df$outcome == 1),
+        Cutpoint = NA, NPV = NA, PPV = NA,
+        Sensitivity = NA, Specificity = NA,
+        Accuracy = NA,
+        AUC_CV = NA, SD_CV = NA,
+        AUC_Boot = NA, CI_Lower_Boot = NA, CI_Upper_Boot = NA
+      ))
+    }
+    
+    # Fit full model
+    model <- glm(outcome ~ z_log2_serum_BDTau + Age + Sex, data = df, family = binomial())
+    prob <- predict(model, type = "response")
+    
+    # Full ROC
+    roc_obj <- pROC::roc(df$outcome, prob, levels = c(0, 1), direction = "<")
+    ci_vals <- pROC::ci.auc(roc_obj)
+    
+    # Best cutpoint
+    coords_best <- pROC::coords(roc_obj, "best", ret = "all", best.method = "youden")
+    if (is.data.frame(coords_best) && nrow(coords_best) > 1) {
+      coords_best <- coords_best[which.max(coords_best$sensitivity), ]
+    }
+    thr <- as.numeric(coords_best[["threshold"]])
+    pred <- ifelse(prob >= thr, 1, 0)
+    
+    TP <- sum(pred == 1 & df$outcome == 1)
+    TN <- sum(pred == 0 & df$outcome == 0)
+    FP <- sum(pred == 1 & df$outcome == 0)
+    FN <- sum(pred == 0 & df$outcome == 1)
+    
+    ## --------- Cross-validation ---------
+    folds <- sample(rep(1:n_folds, length.out = nrow(df)))
+    aucs_cv <- map_dbl(1:n_folds, function(i) {
+      train <- df[folds != i, ]
+      test <- df[folds == i, ]
+      if (length(unique(train$outcome)) < 2 || length(unique(train$Sex)) < 2) return(NA)
+      tryCatch({
+        m_cv <- glm(outcome ~ z_log2_serum_BDTau + Age + Sex, data = train, family = binomial())
+        prob_test <- predict(m_cv, newdata = test, type = "response")
+        roc_cv <- pROC::roc(test$outcome, prob_test, levels = c(0, 1), direction = "<")
+        as.numeric(pROC::auc(roc_cv))
+      }, error = function(e) NA)
+    })
+    
+    ## --------- Bootstrapping ---------
+    aucs_boot <- map_dbl(1:n_boot, function(i) {
+      boot_idx <- sample(seq_len(nrow(df)), replace = TRUE)
+      df_boot <- df[boot_idx, ]
+      if (length(unique(df_boot$outcome)) < 2 || length(unique(df_boot$Sex)) < 2) return(NA)
+      tryCatch({
+        m_boot <- glm(outcome ~ z_log2_serum_BDTau + Age + Sex, data = df_boot, family = binomial())
+        prob_boot <- predict(m_boot, type = "response")
+        roc_boot <- pROC::roc(df_boot$outcome, prob_boot, levels = c(0, 1), direction = "<")
+        as.numeric(pROC::auc(roc_boot))
+      }, error = function(e) NA)
+    })
+    
+    tibble(
+      Comparison = paste(pair[2], "vs.", pair[1]),
+      
+      AUC = as.numeric(roc_obj$auc),
+      CI_Lower = ci_vals[1],
+      CI_Upper = ci_vals[3],
+      
+      Sensitivity = coords_best[["sensitivity"]],
+      Specificity = coords_best[["specificity"]],
+      NPV = coords_best[["npv"]],
+      PPV = coords_best[["ppv"]],
+      Accuracy = (TP + TN) / (TP + TN + FP + FN),
+      Cutpoint = thr,
+      
+      AUC_CV_Mean = mean(aucs_cv, na.rm = TRUE),
+      AUC_CV_SD   = sd(aucs_cv, na.rm = TRUE),
+      
+      AUC_Boot_Mean  = mean(aucs_boot, na.rm = TRUE),
+      AUC_Boot_SD    = sd(aucs_boot, na.rm = TRUE),
+      AUC_Boot_Lower = quantile(aucs_boot, 0.025, na.rm = TRUE),
+      AUC_Boot_Upper = quantile(aucs_boot, 0.975, na.rm = TRUE)
+    )
+  })
+}
+
+# Section 1: Control vs SCI vs TBI
+section1_match_summary <- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort2,
+  pairs = list(c("SCI", "TBI")),
+  section_label = "1. Primary 3-group"
+)
+
+# Section 2: Control vs SCI subgroups
+# Section 3: Control vs TBI subgroups
+
+# Section 4: SCI subgroup pairwise
+section4_match_summary <- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort3,
+  pairs = list(c("B SCI", "A SCI"), c("C/D SCI", "A SCI"), c("C/D SCI", "B SCI")),
+  section_label = "4. Pairwise SCI subgroups"
+)
+
+# Section 5: TBI subgroup pairwise
+section5_match_summary <- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort3,
+  pairs = list(c("Moderate TBI", "Severe TBI")),
+  section_label = "5. Pairwise TBI subgroups"
+)
+
+# Section 6: SCI vs TBI subgroups
+section6_match_summary <- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort,
+  pairs = list(c("SCI", "Moderate TBI"), c("SCI", "Severe TBI")),
+  section_label = "6. SCI vs. TBI subgroups"
+)
+
+# Combine all
+all_roc_match_summary <- bind_rows(
+  section1_match_summary,
+  section4_match_summary,
+  section5_match_summary,
+  section6_match_summary
+)
+
+# Format for publication
+all_roc_match_formatted <- all_roc_match_summary %>%
+  mutate(
+    AUC_CI = sprintf("%.3f (%.3f-%.3f)", AUC, CI_Lower, CI_Upper),
+    Cutpoint = sprintf("%.2f", Cutpoint),
+    Sensitivity = sprintf("%.3f", Sensitivity),
+    Specificity = sprintf("%.3f", Specificity)
+  ) %>%
+  dplyr::select(Comparison, AUC, CI_Lower, CI_Upper, Sensitivity, Specificity,
+                NPV, PPV, Accuracy, Cutpoint,
+                AUC_CV_Mean, AUC_CV_SD, AUC_Boot_Mean, AUC_Boot_SD, AUC_Boot_Lower, AUC_Boot_Upper)
+
+# =============================================
+# Adjusted Logistic ROC: BD-Tau ~ Age + Sex
+# =============================================
+
+# Helper to automate section creation
+
+run_pairwise_roc_section <- function(data, cohort_var, pairs, section_label,
+                                     n_folds = 5, n_boot = 1000, seed = 42) {
+  set.seed(seed)
+  
+  purrr::map_dfr(pairs, function(pair) {
+    df <- data %>%
+      rename(cohort = {{cohort_var}}) %>%
+      filter(cohort %in% pair) %>%
+      mutate(
+        outcome = as.numeric(cohort == pair[2]),
+        Sex = factor(Sex, levels = c("Male", "Female"))
+      ) %>%
+      drop_na(z_log2_csf_BDTau, Age, Sex, outcome)
+    
+    if (length(unique(df$outcome)) < 2 || length(unique(df$Sex)) < 2) {
+      return(tibble(
+        Section = section_label,
+        Comparison = paste(pair[2], "vs.", pair[1]),
+        AUC = NA, CI_Lower = NA, CI_Upper = NA,
+        N_Reference = sum(df$outcome == 0),
+        N_Positive = sum(df$outcome == 1),
+        Cutpoint = NA, NPV = NA, PPV = NA,
+        Sensitivity = NA, Specificity = NA,
+        Accuracy = NA,
+        AUC_CV = NA, SD_CV = NA,
+        AUC_Boot = NA, CI_Lower_Boot = NA, CI_Upper_Boot = NA
+      ))
+    }
+    
+    # Fit full model
+    model <- glm(outcome ~ z_log2_csf_BDTau + Age + Sex, data = df, family = binomial())
+    prob <- predict(model, type = "response")
+    
+    # Full ROC
+    roc_obj <- pROC::roc(df$outcome, prob, levels = c(0, 1), direction = "<")
+    ci_vals <- pROC::ci.auc(roc_obj)
+    
+    # Best cutpoint
+    coords_best <- pROC::coords(roc_obj, "best", ret = "all", best.method = "youden")
+    if (is.data.frame(coords_best) && nrow(coords_best) > 1) {
+      coords_best <- coords_best[which.max(coords_best$sensitivity), ]
+    }
+    thr <- as.numeric(coords_best[["threshold"]])
+    pred <- ifelse(prob >= thr, 1, 0)
+    
+    TP <- sum(pred == 1 & df$outcome == 1)
+    TN <- sum(pred == 0 & df$outcome == 0)
+    FP <- sum(pred == 1 & df$outcome == 0)
+    FN <- sum(pred == 0 & df$outcome == 1)
+    
+    ## --------- Cross-validation ---------
+    folds <- sample(rep(1:n_folds, length.out = nrow(df)))
+    aucs_cv <- map_dbl(1:n_folds, function(i) {
+      train <- df[folds != i, ]
+      test <- df[folds == i, ]
+      if (length(unique(train$outcome)) < 2 || length(unique(train$Sex)) < 2) return(NA)
+      tryCatch({
+        m_cv <- glm(outcome ~ z_log2_csf_BDTau + Age + Sex, data = train, family = binomial())
+        prob_test <- predict(m_cv, newdata = test, type = "response")
+        roc_cv <- pROC::roc(test$outcome, prob_test, levels = c(0, 1), direction = "<")
+        as.numeric(pROC::auc(roc_cv))
+      }, error = function(e) NA)
+    })
+    
+    ## --------- Bootstrapping ---------
+    aucs_boot <- map_dbl(1:n_boot, function(i) {
+      boot_idx <- sample(seq_len(nrow(df)), replace = TRUE)
+      df_boot <- df[boot_idx, ]
+      if (length(unique(df_boot$outcome)) < 2 || length(unique(df_boot$Sex)) < 2) return(NA)
+      tryCatch({
+        m_boot <- glm(outcome ~ z_log2_csf_BDTau + Age + Sex, data = df_boot, family = binomial())
+        prob_boot <- predict(m_boot, type = "response")
+        roc_boot <- pROC::roc(df_boot$outcome, prob_boot, levels = c(0, 1), direction = "<")
+        as.numeric(pROC::auc(roc_boot))
+      }, error = function(e) NA)
+    })
+    
+    tibble(
+      Comparison = paste(pair[2], "vs.", pair[1]),
+      
+      AUC = as.numeric(roc_obj$auc),
+      CI_Lower = ci_vals[1],
+      CI_Upper = ci_vals[3],
+      
+      Sensitivity = coords_best[["sensitivity"]],
+      Specificity = coords_best[["specificity"]],
+      NPV = coords_best[["npv"]],
+      PPV = coords_best[["ppv"]],
+      Accuracy = (TP + TN) / (TP + TN + FP + FN),
+      Cutpoint = thr,
+      
+      AUC_CV_Mean = mean(aucs_cv, na.rm = TRUE),
+      AUC_CV_SD   = sd(aucs_cv, na.rm = TRUE),
+      
+      AUC_Boot_Mean  = mean(aucs_boot, na.rm = TRUE),
+      AUC_Boot_SD    = sd(aucs_boot, na.rm = TRUE),
+      AUC_Boot_Lower = quantile(aucs_boot, 0.025, na.rm = TRUE),
+      AUC_Boot_Upper = quantile(aucs_boot, 0.975, na.rm = TRUE)
+    )
+  })
+}
+
+# Section 1: Control vs SCI vs TBI
+section1_csf_match_summary<- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort2,
+  pairs = list(c("SCI", "TBI")),
+  section_label = "1. Primary 3-group"
+)
+
+# Section 2: Control vs SCI subgroups
+# Section 3: Control vs TBI subgroups
+
+# Section 4: SCI subgroup pairwise
+section4_csf_match_summary<- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort3,
+  pairs = list(c("B SCI", "A SCI"), c("C/D SCI", "A SCI"), c("C/D SCI", "B SCI")),
+  section_label = "4. Pairwise SCI subgroups"
+)
+
+# Section 5: TBI subgroup pairwise
+section5_csf_match_summary<- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort3,
+  pairs = list(c("Moderate TBI", "Severe TBI")),
+  section_label = "5. Pairwise TBI subgroups"
+)
+
+# Section 6: SCI vs TBI subgroups
+section6_csf_match_summary<- run_pairwise_roc_section(
+  data = match_roc_data,
+  cohort_var = Cohort,
+  pairs = list(c("SCI", "Moderate TBI"), c("SCI", "Severe TBI")),
+  section_label = "6. SCI vs. TBI subgroups"
+)
+
+# Combine all
+all_roc_csf_match_summary<- bind_rows(
+  section1_csf_match_summary,
+  section4_csf_match_summary,
+  section5_csf_match_summary,
+  section6_csf_match_summary
+)
+
+# Format for publication
+all_roc_csf_match_formatted <- all_roc_csf_match_summary%>%
+  mutate(
+    AUC_CI = sprintf("%.3f (%.3f-%.3f)", AUC, CI_Lower, CI_Upper),
+    Cutpoint = sprintf("%.2f", Cutpoint),
+    Sensitivity = sprintf("%.3f", Sensitivity),
+    Specificity = sprintf("%.3f", Specificity)
+  ) %>%
+  dplyr::select(Comparison, AUC, CI_Lower, CI_Upper, Sensitivity, Specificity,
+                NPV, PPV, Accuracy, Cutpoint,
+                AUC_CV_Mean, AUC_CV_SD, AUC_Boot_Mean, AUC_Boot_SD, AUC_Boot_Lower, AUC_Boot_Upper)
+
+matched_summary <- rbind(all_roc_match_summary %>% mutate(Platform = "Serum"),
+                         all_roc_csf_match_summary %>% mutate(Platform = "CSF")) %>%
+  filter(Comparison %in% c("TBI vs. SCI", "Severe TBI vs. SCI", 
+                           "A SCI vs. B SCI", "A SCI vs. C/D SCI", "B SCI vs. C/D SCI"))
+
+forest_data <- matched_summary %>%
+  mutate(
+    Comparison = factor(Comparison, levels = c(
+      "TBI vs. SCI","Severe TBI vs. SCI", 
+      "A SCI vs. B SCI", "A SCI vs. C/D SCI",
+      "B SCI vs. C/D SCI"
+    )), 
+    Group = paste0(Platform, " ", Comparison)
+  )
+
+group_cols <- c(
+  "Serum" = "black",
+  "CSF" = "#415a77"
+)
+
+# Plot
+p_adj_forest <- ggplot(forest_data, aes(x = AUC, y = Platform)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper, color = Platform), height = 0.2) +
+  geom_point(aes(color = Platform), size = 3, shape = 18) +
+  scale_x_continuous(limits = c(0.2, 1), breaks = seq(0.2, 1.0, 0.1)) +
+  facet_grid(Comparison ~ ., scales = "free_y", space = "free_y") +
+  scale_color_manual(values = group_cols) +
+  labs(x = "Adjusted AUC (95% CI)", y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold"),
+    panel.grid.major.y = element_line(color = "grey95")
+  )
+
+# Print
+print(p_adj_forest)
+
+# Save
+pdf("~/Desktop/Projects/manuscript writing/TBI BD-tau/figure/Extended Data Figure 1.pdf", 
+    height = 11.69/3, width = 8.27*0.8)
+print(p_adj_forest)
+dev.off()
+
+# =============================================
+# DeLong: Serum vs. CSF within each comparison
+# (paired, because both fluids are measured on
+#  the same matched subjects)
+# Compares the adjusted models BD-Tau + Age + Sex
+# =============================================
+
+serum_vs_csf_delong <- function(data, cohort_var, pair) {
+  df <- data %>%
+    rename(cohort = !!rlang::sym(cohort_var)) %>%
+    filter(cohort %in% pair) %>%
+    mutate(
+      outcome = as.numeric(cohort == pair[2]),
+      Sex     = factor(Sex, levels = c("Male", "Female"))
+    ) %>%
+    # drop on BOTH biomarkers so the two ROCs are on identical cases (required for paired DeLong)
+    drop_na(z_log2_serum_BDTau, z_log2_csf_BDTau, Age, Sex, outcome)
+  
+  if (length(unique(df$outcome)) < 2 || length(unique(df$Sex)) < 2 || nrow(df) < 5) {
+    return(tibble(
+      Comparison = paste(pair[2], "vs.", pair[1]),
+      N = nrow(df), AUC_Serum = NA_real_, AUC_CSF = NA_real_,
+      DeLong_Z = NA_real_, DeLong_P = NA_real_
+    ))
+  }
+  
+  m_serum <- glm(outcome ~ z_log2_serum_BDTau + Age + Sex, data = df, family = binomial())
+  m_csf   <- glm(outcome ~ z_log2_csf_BDTau   + Age + Sex, data = df, family = binomial())
+  
+  roc_serum <- pROC::roc(df$outcome, predict(m_serum, type = "response"),
+                         levels = c(0, 1), direction = "<")
+  roc_csf   <- pROC::roc(df$outcome, predict(m_csf,   type = "response"),
+                         levels = c(0, 1), direction = "<")
+  
+  test <- pROC::roc.test(roc_serum, roc_csf, method = "delong", paired = TRUE)
+  
+  tibble(
+    Comparison = paste(pair[2], "vs.", pair[1]),
+    N          = nrow(df),
+    AUC_Serum  = as.numeric(roc_serum$auc),
+    AUC_CSF    = as.numeric(roc_csf$auc),
+    DeLong_Z   = unname(test$statistic),
+    DeLong_P   = test$p.value
+  )
+}
+
+# Mirror the exact pairs/cohort vars used in the sections so labels match the forest plot
+delong_specs <- list(
+  list(cohort_var = "Cohort2", pair = c("SCI", "TBI")),          # -> "TBI vs. SCI"
+  list(cohort_var = "Cohort",  pair = c("SCI", "Severe TBI")),   # -> "Severe TBI vs. SCI"
+  list(cohort_var = "Cohort3", pair = c("B SCI",   "A SCI")),    # -> "A SCI vs. B SCI"
+  list(cohort_var = "Cohort3", pair = c("C/D SCI", "A SCI")),    # -> "A SCI vs. C/D SCI"
+  list(cohort_var = "Cohort3", pair = c("C/D SCI", "B SCI"))     # -> "B SCI vs. C/D SCI"
+)
+
+serum_vs_csf_delong_results <- purrr::map_dfr(
+  delong_specs,
+  ~ serum_vs_csf_delong(match_roc_data, .x$cohort_var, .x$pair)
+) %>%
+  mutate(
+    P_adj = p.adjust(DeLong_P, method = "BH"),   # optional: drop if you don't want multiplicity adjustment
+    P_label = ifelse(DeLong_P < 0.001, "<0.001", sprintf("%.3f", DeLong_P)),
+    delta_AUC = AUC_Serum - AUC_CSF
+  ) 
+
+print(serum_vs_csf_delong_results)
+
+```
+
+```{r figure 3 supplementary table 2}
+
+# ----- load dataset -----
+
+# load commercial bd-tau (TBI/SCI cohort)
+
+commercial_bdtau <- bind_rows(
+  tbi_serum_demo %>% dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value),
+  sci_serum_demo %>% dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value), 
+  cntr_cleaned %>% dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value)) %>%
+  mutate(Subject.Visit = ifelse(suppressWarnings(!is.na(as.numeric(Subject.Visit))), 
+                                sprintf("%.2f", as.numeric(Subject.Visit)), 
+                                Subject.Visit %>%
+                                  # Case 1: SP-01-####-C-XX → SP-01-####.C
+                                  str_replace("^((?:SP-\\d+-\\d+))-(\\w)-.*$", "\\1.\\2") %>%
+                                  # Case 2: ST-####-+CODE-XX → ST-####.CODE
+                                  str_replace("^([A-Z]+-\\d+)-\\+([A-Z0-9]+)-.*$", "\\1.\\2") %>%
+                                  # Case 3: ST-####-CODE-XX → ST-####.CODE  (SCS, etc.)
+                                  str_replace("^([A-Z]+-\\d+)-([A-Z0-9]{2,})-.*$", "\\1.\\2") %>%
+                                  # Case 4: ST-####-C-XX → ST-####.C
+                                  str_replace("^([A-Z]+-\\d+)-([A-Z])-.*$","\\1.\\2")
+                                 )
+    ) %>%
+  filter(!is.na(serum_BDTau)) %>%
+  group_by(Subject.ID, Subject.Visit) %>%
+  arrange(desc(!is.na(serum_Raw_Day_Value)), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  distinct() 
+
+sapply(commercial_bdtau, function(x) sum(is.na(x)))
+
+# load N4PD bd-tau
+
+setwd("~/Desktop/Projects/2025_05_19_TBI_SCI_BDTau/Raw_Data/N4PD")
+
+n4pd_vars <- c("BD-tau_N4PD","GFAP_N4PD","NfL_N4PD","UCH-L1_N4PD")
+bmkrs <- c("BD-tau (pg/ml)", n4pd_vars)
+
+sTBI_N4PD <- read_excel("TBI SCI_N4PD_Results_11212025.xlsx", sheet = 1) %>%
+  mutate(Cohort = "Severe TBI",
+         `Subject ID` = as.character(`Subject ID`),
+         `Specimen ID` = as.character(`Specimen ID`),
+         `Time From Injury` = as.numeric(`Time From Injury`)) %>%
+  mutate(across(n4pd_vars, ~suppressWarnings(as.numeric(as.character(.))))) %>%
+  dplyr::select(`Subject ID`, `Specimen ID`, 
+                `Time From Injury`, bmkrs, Cohort)
+
+SCI_N4PD <- read_excel("TBI SCI_N4PD_Results_11212025.xlsx", sheet = 2) %>%
+  mutate(Cohort = "SCI",
+         `Time From Injury` = as.numeric(`Time From Injury`)) %>%
+  mutate(across(n4pd_vars, ~suppressWarnings(as.numeric(as.character(.))))) %>%
+  rename(`Subject ID` = `Participant ID`) %>%
+  dplyr::select(`Subject ID`, `Specimen ID`, 
+                `Time From Injury`, bmkrs, Cohort)
+
+mTBI_N4PD <- read_excel("TBI SCI_N4PD_Results_11212025.xlsx", sheet = 3) %>%
+  mutate(Cohort = case_when(Group == "Controls" ~ "Control",
+                            Group == "Mild" ~ "Mild TBI",
+                            Group == "Severe" ~ "Severe TBI",
+                            TRUE ~ NA_character_),
+         `Specimen ID` = `Current Label`,
+         `Time From Injury` = NA_real_,
+         `BD-tau (pg/ml)` = `BD-tau_June2025`) %>%
+  mutate(across(n4pd_vars, ~suppressWarnings(as.numeric(as.character(.))))) %>%
+  dplyr::select(`Subject ID`, `Specimen ID`, 
+                `Time From Injury`, bmkrs, Cohort)
+
+n4pd_bdtau <- bind_rows(
+  sTBI_N4PD, SCI_N4PD, mTBI_N4PD) %>%
+  # drop_na(all_of(bmkrs)) %>%
+  mutate(Days_From_Injury = case_when(!is.na(`Time From Injury`) ~ `Time From Injury`/24,
+                                      Cohort == 0 ~ 0,
+                                      grepl("-A-", `Specimen ID`) ~ 0,
+                                      grepl("-D-", `Specimen ID`) ~ 14,
+                                      grepl(".B.", `Specimen ID`) ~ 90,
+                                      grepl(".C.", `Specimen ID`) ~ 180),
+        Subject.Visit = ifelse(suppressWarnings(!is.na(as.numeric(`Specimen ID`))), 
+                                sprintf("%.2f", as.numeric(`Specimen ID`)), 
+                                `Specimen ID` %>%
+                                  # Case 1: SP-01-####-C-XX → SP-01-####.C
+                                  str_replace("^((?:SP-\\d+-\\d+))-(\\w)-.*$", "\\1.\\2") %>%
+                                  # Case 2: ST-####-+CODE-XX → ST-####.CODE
+                                  str_replace("^([A-Z]+-\\d+)-\\+([A-Z0-9]+)-.*$", "\\1.\\2") %>%
+                                  # Case 3: ST-####-CODE-XX → ST-####.CODE  (SCS, etc.)
+                                  str_replace("^([A-Z]+-\\d+)-([A-Z0-9]{2,})-.*$", "\\1.\\2") %>%
+                                  # Case 4: ST-####-C-XX → ST-####.C
+                                  str_replace("^([A-Z]+-\\d+)-([A-Z])-.*$","\\1.\\2")
+                                 ),
+         Subject.ID = case_when(
+           # SP-01-1004-A-10S -> SP-1004
+           str_detect(`Specimen ID`, "^SP-01-") ~
+             str_replace(`Specimen ID`, "^SP-01-(\\d+).*", "SP-\\1"),
+           
+           # CTE-027-07S -> CTE-027
+           str_detect(`Specimen ID`, "^CTE-") ~
+             str_replace(`Specimen ID`, "^(CTE-\\d+).*", "\\1"),
+           
+           # MCS-1021-A-07S -> MCS-1021
+           str_detect(`Specimen ID`, "^MCS-") ~
+             str_replace(`Specimen ID`, "^(MCS-\\d+).*", "\\1"),
+           
+           # ST-1001-+36-09S -> ST-1001
+           str_detect(`Specimen ID`, "^ST-") ~
+           str_replace(`Specimen ID`, "^(ST-\\d+).*", "\\1"),
+           
+           TRUE ~ str_remove(`Specimen ID`, "\\..*$"))
+    ) %>%
+  rename(n4pd_BDtau_conc = `BD-tau_N4PD`) %>%
+  dplyr::select(Subject.ID, Subject.Visit, `BD-tau (pg/ml)`, n4pd_BDtau_conc,
+                GFAP_N4PD, NfL_N4PD, `UCH-L1_N4PD`) 
+
+sapply(n4pd_bdtau, function(x) sum(is.na(x)))
+
+# ----- merge together -----
+
+bdtau_conc <- commercial_bdtau %>%
+  filter(!is.na(serum_BDTau)) %>%
+  dplyr::select(Subject.ID, Subject.Visit, Cohort, Sex, Age, serum_BDTau) %>%
+  inner_join(n4pd_bdtau, by = c("Subject.ID", "Subject.Visit")) %>%
+  distinct()
+
+sapply(bdtau_conc, function(x) sum(is.na(x)))
+
+# clean up demographics
+
+bdtau_demo <- bdtau_conc %>%
+  group_by(Subject.ID) %>%
+  summarise(
+    Cohort = first(na.omit(Cohort)),
+    Age = first(na.omit(Age)),
+    Sex = first(na.omit(Sex)),
+    .groups = "drop"
+  ) %>% distinct() %>%
+  filter(!is.na(Sex))
+
+bdtau <- bdtau_conc %>%
+  dplyr::select(-Cohort, -Age, -Sex) %>% 
+  left_join(bdtau_demo, by = "Subject.ID") %>%
+  filter(!is.na(Sex)) %>%
+  mutate(
+    commercial_BDtau_conc = serum_BDTau,
+    n4pd_BDtau_conc = n4pd_BDtau_conc
+  ) %>%
+  # filter(commercial_BDtau_flag != "inconsistency" | is.na(commercial_BDtau_flag)) %>%
+  dplyr::select(Subject.ID, Subject.Visit, Cohort, Sex, Age, 
+                commercial_BDtau_conc, n4pd_BDtau_conc, GFAP_N4PD, NfL_N4PD, `UCH-L1_N4PD`) %>%
+  mutate(
+    across(where(is.character), ~ stringr::str_squish(.x)),
+    across(where(is.numeric),  ~ round(.x, 6))
+  ) %>%
+  distinct()
+
+dup_ids <- bdtau$Subject.Visit[duplicated(bdtau$Subject.Visit)]
+
+bdtau_clean <- bdtau %>%
+  # remove subjects have conflict values
+  filter(!(Subject.Visit %in% dup_ids)) %>%
+  filter(!is.na(n4pd_BDtau_conc) & !is.na(`UCH-L1_N4PD`))
+
+sapply(bdtau_clean, function(x) sum(is.na(x)))
+
+# count number of visits
+
+n_visits <- bdtau_clean %>%
+  group_by(Subject.ID) %>%
+  summarise(
+    n_visits = n_distinct(Subject.Visit),
+    .groups = "drop"
+  )
+
+bdtau_conc_baseline <- bdtau_clean %>%
+  filter(
+    # !is.na(inhouse_BDtau_conc),
+    !is.na(commercial_BDtau_conc),
+    # !is.na(n4pd_BDtau_conc)
+    !is.na(n4pd_BDtau_conc)
+  ) %>%
+  group_by(Subject.ID) %>%
+  arrange(stringr::str_order(Subject.Visit, numeric = TRUE), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  left_join(n_visits, by = "Subject.ID") %>%
+  mutate(Cohort2 = factor(case_when(Cohort %in% c("Mild TBI", "Moderate TBI", "Severe TBI", "TBI") ~ "TBI", 
+                             Cohort == "SCI" ~ "SCI",
+                             Cohort == "Control" ~ "Control", 
+                             TRUE ~ NA_character_),
+                          levels = c("Control", "SCI", "TBI")),
+         n4pd_BDtau_conc = suppressWarnings(as.numeric(n4pd_BDtau_conc)),
+         GFAP_N4PD = suppressWarnings(as.numeric(GFAP_N4PD)),
+         NfL_N4PD = suppressWarnings(as.numeric(NfL_N4PD)),
+         `UCH-L1_N4PD` = suppressWarnings(as.numeric(`UCH-L1_N4PD`))) %>%
+  mutate(Cohort3 = case_when(Subject.ID %in% asia_a_ids ~ "A SCI",
+                             Subject.ID %in% asia_b_ids ~ "B SCI",
+                             Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+                             TRUE ~ Cohort))
+
+# ----- Supplementary Table 2 -----
+
+bdtau_conc_baseline %>%
+  mutate(
+    Cohort = factor(Cohort, levels = c("Control", "SCI", "Mild TBI", "Moderate TBI", "Severe TBI")),
+    n4pd_BDtau_conc = suppressWarnings(as.numeric(n4pd_BDtau_conc))
+  ) %>%
+  filter(Cohort %in% c("Control", "SCI", "Mild TBI", "Moderate TBI", "Severe TBI")) %>%
+  select(-Subject.ID, -Subject.Visit, -Cohort) %>%
+  tbl_summary(
+    by = Cohort2,
+    digits = list(all_categorical() ~ c(0, 1), all_continuous() ~ 2),
+    statistic = list(
+      all_continuous() ~ "{mean} ± {sd}",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    missing_text = "(Missing)",
+    missing = "ifany"
+  ) %>%
+  bold_labels() %>%
+  add_overall() %>%
+  add_p()
+
+# summary table
+
+library(tidyr)
+library(dplyr)
+
+biomarker_summary <- bdtau_conc_baseline %>%
+  select(
+    Cohort3,
+    commercial_BDtau_conc,
+    n4pd_BDtau_conc,
+    GFAP_N4PD,
+    NfL_N4PD,
+    `UCH-L1_N4PD`
+  ) %>%
+  pivot_longer(
+    cols = -Cohort3, # everything(),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  summarise(
+    N = sum(!is.na(Value)),
+    Mean = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE),
+    IQR = IQR(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    .by = c(Cohort3, Biomarker)
+  ) %>% 
+  filter(Cohort3 %in% c("A SCI", "B SCI", "C/D SCI", "Mild TBI", "Moderate TBI", "Severe TBI", "Control"))
+
+median_fc <- biomarker_summary %>%
+  select(Biomarker, Cohort3, Median) %>%
+  pivot_wider(
+    names_from  = Cohort3,
+    values_from = Median
+  ) %>%
+  mutate(
+    FC_sTBI_vs_modTBI     = `Severe TBI` / `Moderate TBI`,
+    FC_sTBI_vs_mildTBI = `Severe TBI` / `Mild TBI`,
+    FC_modTBI_vs_mildTBI = `Moderate TBI` / `Mild TBI`,
+    FC_A_vs_B     = `A SCI` / `B SCI`,
+    FC_A_vs_CD = `A SCI` / `C/D SCI`,
+    FC_B_vs_CD = `B SCI` / `C/D SCI`
+  ) %>%
+  select(
+    Biomarker,
+    FC_sTBI_vs_modTBI,
+    FC_sTBI_vs_mildTBI,
+    FC_modTBI_vs_mildTBI,
+    FC_A_vs_B,
+    FC_A_vs_CD,
+    FC_B_vs_CD,
+  )
+
+biomarker_summary <- biomarker_summary %>%
+  left_join(median_fc, by = "Biomarker") %>%
+  filter(Biomarker != "n4pd_BDtau_conc")
+
+# ----- figure 3 -----
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(pROC)
+  library(purrr)
+})
+
+bdtau_conc_baseline_roc <- bdtau_conc_baseline %>%
+  mutate(
+    Cohort3 = case_when(
+      Subject.ID %in% asia_a_ids  ~ "A SCI",
+      Subject.ID %in% asia_b_ids  ~ "B SCI",
+      Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ Cohort
+    )
+  ) %>%
+  # make UCH-L1 syntactic to avoid formula/variable parsing issues downstream
+  rename(UCH_L1_N4PD = `UCH-L1_N4PD`)
+
+# Function to perform ROC + CV + bootstrap
+
+perform_roc <- function(data, group1, group2, predictor,
+                        n_folds = 5, n_boot = 1000, seed = 42,
+                        best_method = "youden") {
+  
+  set.seed(seed)
+  
+  df <- data %>%
+    filter(cohort %in% c(group1, group2)) %>%
+    mutate(outcome = ifelse(cohort == group2, 1L, 0L)) %>%
+    drop_na(all_of(c(predictor, "outcome")))
+  
+  if (dplyr::n_distinct(df$outcome) < 2) {
+    return(list(
+      roc = NA, coords = NA,
+      auc = NA_real_, ci = c(NA_real_, NA_real_, NA_real_),
+      n_group1 = sum(df$outcome == 0), n_group2 = sum(df$outcome == 1),
+      confusion = c(TP = NA, FP = NA, TN = NA, FN = NA),
+      cv = list(
+        fold_table = tibble(),
+        auc_mean = NA_real_, auc_sd = NA_real_,
+        threshold_mean = NA_real_, threshold_sd = NA_real_,
+        sensitivity = NA_real_, specificity = NA_real_, ppv = NA_real_, npv = NA_real_, accuracy = NA_real_
+      ),
+      boot = list(
+        aucs = NA_real_,
+        auc_mean = NA_real_, auc_sd = NA_real_,
+        ci_lower = NA_real_, ci_upper = NA_real_
+      )
+    ))
+  }
+
+  # In-sample ROC + "best" threshold (descriptive)
+  
+  roc_obj <- pROC::roc(
+    response = df$outcome,
+    predictor = df[[predictor]],
+    levels = c(0, 1),
+    direction = "auto",
+    quiet = TRUE
+  )
+  
+  auc_val <- as.numeric(pROC::auc(roc_obj))
+  ci_val  <- as.numeric(pROC::ci.auc(roc_obj))
+  
+  coords_best <- pROC::coords(roc_obj, "best", ret = "all", best.method = best_method)
+  coords_best <- as.data.frame(coords_best)
+  if (nrow(coords_best) > 1) coords_best <- coords_best[which.max(coords_best$sensitivity), , drop = FALSE]
+  thr <- as.numeric(coords_best$threshold)
+  
+  pred_pos <- ifelse(df[[predictor]] >= thr, 1L, 0L)
+  
+  tp <- sum(pred_pos == 1L & df$outcome == 1L)
+  fp <- sum(pred_pos == 1L & df$outcome == 0L)
+  tn <- sum(pred_pos == 0L & df$outcome == 0L)
+  fn <- sum(pred_pos == 0L & df$outcome == 1L)
+  
+  sensitivity <- if ((tp + fn) > 0) tp / (tp + fn) else NA_real_
+  specificity <- if ((tn + fp) > 0) tn / (tn + fp) else NA_real_
+  ppv <- if ((tp + fp) > 0) tp / (tp + fp) else NA_real_
+  npv <- if ((tn + fn) > 0) tn / (tn + fn) else NA_real_
+  accuracy <- (tp + tn) / (tp + tn + fp + fn)
+  
+  coords_best$NPV <- npv
+  coords_best$PPV <- ppv
+  coords_best$Sensitivity <- sensitivity
+  coords_best$Specificity <- specificity
+  coords_best$Accuracy <- accuracy
+  
+  ## -------------------------
+  ## Cross-validation
+  ## - AUC on held-out folds
+  ## - Threshold learned on TRAIN folds, applied to TEST folds (addresses "same set" concern)
+  ## -------------------------
+  
+  folds <- sample(rep(seq_len(n_folds), length.out = nrow(df)))
+  
+  cv_tbl <- purrr::map_dfr(seq_len(n_folds), function(k) {
+    train <- df[folds != k, , drop = FALSE]
+    test <- df[folds == k, , drop = FALSE]
+    
+    if (nrow(test) == 0 || dplyr::n_distinct(train$outcome) < 2 || dplyr::n_distinct(test$outcome) < 2) {
+      return(tibble::tibble(
+        fold = k, auc = NA_real_, threshold = NA_real_,
+        sensitivity = NA_real_, specificity = NA_real_, ppv = NA_real_, npv = NA_real_, accuracy = NA_real_
+      ))
+    }
+    
+    roc_train <- tryCatch(
+      pROC::roc(train$outcome, train[[predictor]], levels = c(0, 1), direction = "auto", quiet = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(roc_train)) {
+      return(tibble::tibble(
+        fold = k, auc = NA_real_, threshold = NA_real_,
+        sensitivity = NA_real_, specificity = NA_real_, ppv = NA_real_, npv = NA_real_, accuracy = NA_real_
+      ))
+    }
+    
+    cb <- pROC::coords(roc_train, "best", ret = "all", best.method = best_method)
+    cb <- as.data.frame(cb)
+    if (nrow(cb) > 1) cb <- cb[which.max(cb$sensitivity), , drop = FALSE]
+    thr_k <- as.numeric(cb$threshold)
+    
+    roc_test <- tryCatch(
+      pROC::roc(test$outcome, test[[predictor]], levels = c(0, 1), direction = "auto", quiet = TRUE),
+      error = function(e) NULL
+    )
+    auc_k <- if (is.null(roc_test)) NA_real_ else as.numeric(pROC::auc(roc_test))
+    
+    pred_k <- ifelse(test[[predictor]] >= thr_k, 1L, 0L)
+    tp_k <- sum(pred_k == 1L & test$outcome == 1L)
+    fp_k <- sum(pred_k == 1L & test$outcome == 0L)
+    tn_k <- sum(pred_k == 0L & test$outcome == 0L)
+    fn_k <- sum(pred_k == 0L & test$outcome == 1L)
+    
+    sens_k <- if ((tp_k + fn_k) > 0) tp_k / (tp_k + fn_k) else NA_real_
+    spec_k <- if ((tn_k + fp_k) > 0) tn_k / (tn_k + fp_k) else NA_real_
+    ppv_k <- if ((tp_k + fp_k) > 0) tp_k / (tp_k + fp_k) else NA_real_
+    npv_k <- if ((tn_k + fn_k) > 0) tn_k / (tn_k + fn_k) else NA_real_
+    acc_k <- (tp_k + tn_k) / (tp_k + tn_k + fp_k + fn_k)
+    
+    tibble::tibble(
+      fold = k,
+      auc = auc_k,
+      threshold = thr_k,
+      sensitivity = sens_k,
+      specificity = spec_k,
+      ppv = ppv_k,
+      npv = npv_k,
+      accuracy = acc_k
+    )
+  })
+  
+  cv_auc_mean <- mean(cv_tbl$auc, na.rm = TRUE)
+  cv_auc_sd <- sd(cv_tbl$auc, na.rm = TRUE)
+  
+  cv_thr_mean <- mean(cv_tbl$threshold, na.rm = TRUE)
+  cv_thr_sd <- sd(cv_tbl$threshold, na.rm = TRUE)
+  
+  cv_sens <- mean(cv_tbl$sensitivity, na.rm = TRUE)
+  cv_spec <- mean(cv_tbl$specificity, na.rm = TRUE)
+  cv_ppv <- mean(cv_tbl$ppv, na.rm = TRUE)
+  cv_npv <- mean(cv_tbl$npv, na.rm = TRUE)
+  cv_acc <- mean(cv_tbl$accuracy, na.rm = TRUE)
+  
+  # Bootstrap (AUC distribution + percentile CI)
+
+  aucs_boot <- purrr::map_dbl(seq_len(n_boot), function(b) {
+    idx <- sample(seq_len(nrow(df)), replace = TRUE)
+    d_b <- df[idx, , drop = FALSE]
+    if (dplyr::n_distinct(d_b$outcome) < 2) return(NA_real_)
+    
+    roc_b <- tryCatch(
+      pROC::roc(d_b$outcome, d_b[[predictor]], levels = c(0, 1), direction = "auto", quiet = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(roc_b)) NA_real_ else as.numeric(pROC::auc(roc_b))
+  })
+  
+  boot_mean <- mean(aucs_boot, na.rm = TRUE)
+  boot_sd <- sd(aucs_boot, na.rm = TRUE)
+  boot_lower <- as.numeric(quantile(aucs_boot, 0.025, na.rm = TRUE))
+  boot_upper <- as.numeric(quantile(aucs_boot, 0.975, na.rm = TRUE))
+  
+  list(
+    roc = roc_obj,
+    coords = coords_best,
+    auc = auc_val,
+    ci = ci_val,
+    n_group1 = sum(df$outcome == 0),
+    n_group2 = sum(df$outcome == 1),
+    confusion = c(TP = tp, FP = fp, TN = tn, FN = fn),
+    
+    cv = list(
+      fold_table = cv_tbl,
+      auc_mean = cv_auc_mean,
+      auc_sd = cv_auc_sd,
+      threshold_mean = cv_thr_mean,
+      threshold_sd   = cv_thr_sd,
+      sensitivity = cv_sens,
+      specificity = cv_spec,
+      ppv = cv_ppv,
+      npv = cv_npv,
+      accuracy = cv_acc
+    ),
+    
+    boot = list(
+      aucs = aucs_boot,
+      auc_mean = boot_mean,
+      auc_sd = boot_sd,
+      ci_lower = boot_lower,
+      ci_upper = boot_upper
+    )
+  )
+}
+
+## =========================================================
+## Define comparisons
+## =========================================================
+
+comparisons <- list(
+  list(name = "TBI vs. Control", group1 = "Control", group2 = "TBI"),
+  list(name = "TBI vs. SCI", group1 = "SCI", group2 = "TBI"),
+  list(name = "SCI vs. Control", group1 = "Control", group2 = "SCI")
+)
+
+# Loop through all biomarkers and comparisons
+
+bmkrs <- c("commercial_BDtau_conc", "GFAP_N4PD", "NfL_N4PD", "UCH_L1_N4PD")
+
+results_list <- list()
+roc_objects <- list()
+
+for (bmkr in bmkrs) {
+  roc_objects[[bmkr]] <- list()
+  
+  for (comp in comparisons) {
+    roc_result <- perform_roc(
+      bdtau_conc_baseline_roc %>% rename(cohort = Cohort2), 
+      comp$group2, comp$group1, bmkr)
+    
+    # Store ROC object for DeLong tests
+    roc_objects[[bmkr]][[comp$name]] <- roc_result$roc
+    
+    # Store results
+    temp_results <- data.frame(
+      Biomarker = bmkr,
+      Comparison = comp$name,
+      N1 = roc_result$n_group1,
+      N2= roc_result$n_group2,
+      AUC = as.numeric(roc_result$auc),
+      CI_Lower = roc_result$ci[1],
+      CI_Upper = roc_result$ci[3],
+      NPV = roc_result$coords$npv, 
+      PPV = roc_result$coords$ppv, 
+      Sensitivity = roc_result$coords$sensitivity,
+      Specificity = roc_result$coords$specificity
+    )
+    
+    results_list[[paste(bmkr, comp$name, sep = "_")]] <- temp_results
+  }
+}
+
+# Combine all results
+all_roc_results <- bind_rows(results_list)
+
+all_roc_results_forest <- all_roc_results %>%
+  filter(Biomarker != "n4pd_BDtau_conc")
+
+# Perform DeLong tests comparing biomarkers within each comparison
+
+delong_results <- list()
+
+for (comp in comparisons) {
+  comp_name <- comp$name
+  
+  # Get all biomarker combinations
+  bmkr_combos <- combn(bmkrs, 2, simplify = FALSE)
+  
+  for (combo in bmkr_combos) {
+    bmkr1 <- combo[1]
+    bmkr2 <- combo[2]
+    
+    # Get AUC values
+    auc1 <- as.numeric(auc(roc_objects[[bmkr1]][[comp_name]]))
+    auc2 <- as.numeric(auc(roc_objects[[bmkr2]][[comp_name]]))
+    
+    # Perform DeLong test
+    delong_test <- roc.test(
+      roc_objects[[bmkr1]][[comp_name]], 
+      roc_objects[[bmkr2]][[comp_name]], 
+      method = "delong"
+    )
+    
+    delong_results[[paste(comp_name, bmkr1, bmkr2, sep = "_")]] <- data.frame(
+      Comparison = comp_name,
+      Biomarker1 = bmkr1,
+      Biomarker2 = bmkr2,
+      AUC1 = round(auc1, 3),
+      AUC2 = round(auc2, 3),
+      Difference = round(auc1 - auc2, 3),
+      Z_statistic = round(delong_test$statistic, 3),
+      P_value = delong_test$p.value,
+      P_formatted = format.pval(delong_test$p.value, digits = 3, eps = 0.001),
+      Significant = ifelse(delong_test$p.value < 0.05, "Yes", "No")
+    )
+  }
+}
+
+# Combine DeLong results
+
+all_delong_results <- bind_rows(delong_results) %>%
+  mutate(delta_AUC = AUC1 - AUC2)
+
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# Color palette per biomarker
+
+biomarker_colors <- c(
+  "commercial_BDtau_conc" = "#DA4D3F",
+  "GFAP_N4PD" = "#4D3F8D",
+  "NfL_N4PD" = "#E8B402",
+  "UCH_L1_N4PD" = "#007F47"
+)
+
+biomarker_labels <- c(
+  "commercial_BDtau_conc" = "BD-Tau",
+  "GFAP_N4PD" = "GFAP",
+  "NfL_N4PD" = "NfL",
+  "UCH_L1_N4PD" = "UCH-L1"
+)
+
+# Build one plot per comparison
+
+comparison_names <- c("TBI vs. Control", "TBI vs. SCI", "SCI vs. Control")
+
+plot_list <- list()
+
+for (comp_name in comparison_names) {
+  
+  curve_data <- list()
+  label_lines <- c()
+  
+  for (bmkr in bmkrs) {
+    
+    roc_obj <- roc_objects[[bmkr]][[comp_name]]
+    if (is.null(roc_obj)) next
+    
+    auc_val <- as.numeric(auc(roc_obj))
+    ci_val <- ci.auc(roc_obj, conf.level = 0.95)
+    
+    # ROC curve as data frame (1 - specificity vs sensitivity)
+    curve_data[[bmkr]] <- data.frame(
+      fpr = 1 - roc_obj$specificities,
+      tpr = roc_obj$sensitivities,
+      Biomarker = biomarker_labels[[bmkr]]
+    )
+    
+    label_lines[bmkr] <- sprintf(
+      "%s  AUC = %.2f (%.2f–%.2f)",
+      biomarker_labels[[bmkr]], auc_val, ci_val[1], ci_val[3]
+    )
+  }
+  
+  all_curves <- bind_rows(curve_data)
+  
+  # Map display labels to colors
+  color_map <- setNames(
+    biomarker_colors[bmkrs],
+    biomarker_labels[bmkrs]
+  )
+  
+  p <- ggplot(all_curves, aes(x = fpr, y = tpr, color = Biomarker)) +
+    geom_line(linewidth = 1.1) +
+    geom_abline(slope = 1, intercept = 0,
+                linetype = "dashed", color = "grey50", linewidth = 0.6) +
+    scale_color_manual(
+      values = color_map,
+      labels = label_lines[bmkrs],   # AUC labels in legend
+      name = NULL
+    ) +
+    scale_x_continuous(expand = c(0.01, 0), limits = c(0, 1),
+                       labels = scales::percent_format(accuracy = 1)) +
+    scale_y_continuous(expand = c(0.01, 0), limits = c(0, 1),
+                       labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title = comp_name,
+      x = "1 – Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)"
+    ) +
+    theme_classic(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+      legend.position = c(0.62, 0.18),
+      legend.background = element_rect(fill = alpha("white", 0.85),
+                                       color = "grey80", linewidth = 0.4),
+      legend.text = element_text(size = 10, family = "mono"),
+      legend.key.width = unit(1.6, "lines"),
+      axis.text = element_text(size = 11),
+      axis.title = element_text(size = 12)
+    )
+  
+  plot_list[[comp_name]] <- p
+}
+
+plot_list$`TBI vs. SCI`
+
+
+
+biomarker_shapes <- c(
+  "commercial_BDtau_conc" = 16,  # circle
+  "GFAP_N4PD" = 17,  # triangle
+  "NfL_N4PD" = 15,  # square
+  "UCH_L1_N4PD" = 18   # diamond
+)
+biomarker_lty <- c(
+  "commercial_BDtau_conc" = "solid",
+  "GFAP_N4PD" = "dashed",
+  "NfL_N4PD" = "dotdash",
+  "UCH_L1_N4PD" = "longdash"
+)
+
+# bottom-to-top order so BD-Tau ends up on top
+bm_order <- c("UCH_L1_N4PD", "NfL_N4PD", "GFAP_N4PD", "commercial_BDtau_conc")
+
+# ---- data ----
+forest_tbisci <- all_roc_results_forest %>%
+  filter(Comparison == "TBI vs. SCI") %>%
+  mutate(Biomarker = factor(Biomarker, levels = bm_order))
+
+# numeric y position of each biomarker (discrete axis maps to 1..n)
+ypos <- setNames(seq_along(bm_order), bm_order)
+
+# ---- ΔAUC brackets (BD-Tau vs each comparator) ----
+bdtau_auc <- forest_tbisci$AUC[forest_tbisci$Biomarker == "commercial_BDtau_conc"]
+
+delong_tbisci <- all_delong_results %>% filter(Comparison == "TBI vs. SCI")
+
+# p-value lookup: comparator biomarker -> DeLong p vs BD-Tau
+delong_p <- setNames(delong_tbisci$P_value, delong_tbisci$Biomarker2)
+
+# format to 2 significant figures (e.g. 0.0011, 6.7e-06, 0.0015)
+fmt_p <- function(p) formatC(signif(p, 2), format = "g", digits = 2)
+
+bracket_df <- forest_tbisci %>%
+  filter(Biomarker != "commercial_BDtau_conc") %>%
+  transmute(
+    Biomarker = as.character(Biomarker),
+    y_top = ypos["commercial_BDtau_conc"],
+    y_bot = ypos[as.character(Biomarker)],
+    dAUC  = bdtau_auc - AUC,
+    label = sprintf("\u0394AUC=%.2f, p=%s", dAUC, fmt_p(delong_p[as.character(Biomarker)]))
+  ) %>%
+  # innermost bracket (shortest span, GFAP) leftmost; outermost (UCH-L1) rightmost
+  arrange(desc(y_bot)) %>%
+  mutate(xpos = 0.98 + (row_number() - 1) * 0.075)
+
+tick <- 0.012
+add_bracket <- function(d) {
+  list(
+    annotate("segment", x = d$xpos, xend = d$xpos, y = d$y_bot, yend = d$y_top, linewidth = 0.5),
+    annotate("segment", x = d$xpos, xend = d$xpos - tick, y = d$y_top, yend = d$y_top, linewidth = 0.5),
+    annotate("segment", x = d$xpos, xend = d$xpos - tick, y = d$y_bot, yend = d$y_bot, linewidth = 0.5),
+    annotate("text", x = d$xpos + 0.012, y = (d$y_top + d$y_bot) / 2,
+             label = d$label, angle = -90, size = 4)
+  )
+}
+bracket_layers <- do.call(c, lapply(seq_len(nrow(bracket_df)),
+                                    function(i) add_bracket(bracket_df[i, ])))
+
+p <- ggplot(forest_tbisci, aes(x = AUC, y = Biomarker,
+                               color = Biomarker, shape = Biomarker, linetype = Biomarker)) +
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0, linewidth = 0.9) +
+  geom_point(size = 4) +
+  bracket_layers +
+  scale_color_manual(values = biomarker_colors) +
+  scale_shape_manual(values = biomarker_shapes) +
+  scale_linetype_manual(values = biomarker_lty) +
+  scale_y_discrete(labels = biomarker_labels) +
+  scale_x_continuous(limits = c(0.33, 1.22), breaks = seq(0.4, 1.0, 0.2)) +
+  labs(x = "Adjusted AUC (95% CI)", y = NULL, tag = "b", title = "TBI vs. SCI") +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.tag = element_text(face = "bold", size = 20),
+    plot.title = element_text(size = 14, hjust = 0, margin = margin(b = 6)),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.title.x = element_text(size = 15),
+    axis.ticks.y = element_blank()
+  )
+
+print(p)
+
+```
+
+```{r figure 4 supplementary table 3}
+
+# ============================================
+# Serum Cohort: Longitudinal Spaghetti Plots with Control
+# Panel A: Control vs. SCI vs. TBI (3-group)
+# Panel B: Control vs. Subgroups (Moderate/Severe TBI + ASIA SCI)
+# Note: Control excluded from mixed-effects models
+# ============================================
+
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(data.table)
+
+# ============================================
+# PREPARE DATA - SERUM COHORT WITH CONTROL
+# ============================================
+
+# ASIA IDs for SCI subgroups
+asia_a_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & 
+    sci_serum_demo_BL_cleaned$ASIA == "A", ]$Subject.ID
+
+asia_b_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & 
+    sci_serum_demo_BL_cleaned$ASIA == "B", ]$Subject.ID
+
+asia_cd_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & 
+    sci_serum_demo_BL_cleaned$ASIA %in% c("C","D"), ]$Subject.ID
+
+# Get intersection of variables
+intersect_vars <- Reduce(intersect, list(
+  names(cntr),
+  names(sci_serum_demo),
+  names(tbi_serum_demo)
+))
+
+serum_cleaned <- rbindlist(
+  list(
+    cntr %>% dplyr::select(all_of(intersect_vars)),
+    sci_serum_demo %>% dplyr::select(all_of(intersect_vars)),
+    tbi_serum_demo %>% dplyr::select(all_of(intersect_vars))
+  ),
+  use.names = TRUE,
+  fill = FALSE
+) %>%
+  filter(Subject.ID %in% serum_baseline_cleaned$Subject.ID) %>%
+  mutate(
+    Cohort = factor(Cohort, levels = c("Control", "SCI", "Mild TBI", "Moderate TBI", "Severe TBI")),
+    # 3-group classification (exclude Mild TBI)
+    Cohort3 = factor(
+      case_when(
+        Cohort == "Control" ~ "Control",
+        Cohort == "SCI" ~ "SCI",
+        Cohort %in% c("Moderate TBI", "Severe TBI") ~ "TBI",
+        TRUE ~ NA_character_
+      ), 
+      levels = c("Control", "SCI", "TBI")
+    ),
+    # Subgroup classification
+    Cohort_Subgroup = case_when(
+      Cohort == "Control" ~ "Control",
+      !is.na(Subject.ID) & Subject.ID %in% asia_a_ids ~ "A SCI",
+      !is.na(Subject.ID) & Subject.ID %in% asia_b_ids ~ "B SCI",
+      !is.na(Subject.ID) & Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      Cohort == "Moderate TBI" ~ "Moderate TBI",
+      Cohort == "Severe TBI" ~ "Severe TBI",
+      TRUE ~ as.character(Cohort)
+    ),
+    Cohort_Subgroup = factor(Cohort_Subgroup, 
+                             levels = c("Control", "A SCI", "B SCI", "C/D SCI", 
+                                        "Moderate TBI", "Severe TBI")),
+    # Set Control timepoint to 0
+    serum_First_Digit_12Hr = case_when(
+      Cohort == "Control" ~ 0,
+      TRUE ~ serum_First_Digit_12Hr
+    )
+  ) %>%
+  group_by(Subject.ID) %>%
+  mutate(time_since_baseline =
+           serum_First_Digit_12Hr -
+           min(serum_First_Digit_12Hr, na.rm = TRUE)) %>%
+  ungroup() %>% 
+  filter(!is.na(Cohort3) | !is.na(Cohort_Subgroup))  # Keep valid subjects
+
+# Color palettes
+color_3group <- c(
+  "Control" = "black",
+  "SCI" = "#07668d", 
+  "TBI" = "#813405"
+)
+
+color_subgroup <- c(
+  "Control" = "black",
+  "A SCI" = "#007382",
+  "B SCI" = "#019787",
+  "C/D SCI" = "#82e1cd",
+  "Moderate TBI" = "#f9a03f",
+  "Severe TBI" = "#d45113"
+)
+
+# ============================================
+# PANEL A: Control vs. SCI vs. TBI (3-group)
+# ============================================
+
+# Filter to first 12 timepoints (0-144 hours)
+dd_3group <- serum_cleaned %>% 
+  mutate(time_since_baseline = as.numeric(time_since_baseline)) %>%
+  filter(time_since_baseline <= 12) %>%
+  filter(!is.na(Cohort3))
+
+# Prepare plot data
+plot_data_3group <- dd_3group %>%
+  filter(!is.na(time_since_baseline), !is.na(serum_BDTau)) %>%
+  mutate(
+    group = Cohort3,
+    time_hours = as.numeric(as.character(time_since_baseline)) * 12,
+    subject = as.factor(Subject.ID)
+  )
+
+# Summarize mean ± SE
+summary_3group <- plot_data_3group %>%
+  group_by(group, time_hours) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_val = base::mean(serum_BDTau, na.rm = TRUE), 
+    sd_val = stats::sd(serum_BDTau, na.rm = TRUE), 
+    .groups = "drop"
+  ) %>%
+  mutate(se_val = sd_val / sqrt(n))
+
+# Count unique subjects per group
+group_counts_3group <- plot_data_3group %>%
+  dplyr::select(Subject.ID, group) %>%
+  distinct() %>%
+  dplyr::count(group) %>%
+  mutate(label = paste0(group, " (N=", n, ")"))
+
+# Mixed-effects model for statistics - EXCLUDE CONTROL
+plot_data_3group_no_control <- plot_data_3group %>%
+  filter(group != "Control")
+
+lmm_3group <- lmer(serum_log2_BDTau ~ group * time_hours + (1 | subject), 
+                   data = plot_data_3group_no_control)
+anova_3group <- anova(lmm_3group)
+
+cat("\n=== PANEL A: 3-GROUP MODEL (EXCLUDING CONTROL) ===\n")
+print(anova_3group)
+cat("\n")
+
+# Per-timepoint statistics - EXCLUDE CONTROL
+library(dplyr)
+library(tidyr)
+
+tp_pvals_3group <- plot_data_3group_no_control %>%
+  filter(!is.na(time_hours), !is.na(group), !is.na(serum_log2_BDTau)) %>%
+  group_by(time_hours) %>%
+  group_modify(~{
+    dat <- .x
+    
+    n_by_group <- dat %>% count(group, name = "n") %>%
+      mutate(group = as.character(group))
+    
+    if (n_distinct(dat$group) < 2) {
+      out <- tibble(p = NA_real_, test = "kruskal")
+    } else {
+      out <- tibble(
+        p = kruskal.test(serum_log2_BDTau ~ group, data = dat)$p.value,
+        test = "kruskal"
+      )
+    }
+    
+    out %>%
+      bind_cols(
+        n_by_group %>%
+          pivot_wider(names_from = group, values_from = n, names_prefix = "n_")
+      )
+  }) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p, method = "BH"))
+
+# Create plot - NO STATISTICS
+p_serum_3group <- ggplot(summary_3group, aes(x = time_hours, y = mean_val, color = group)) +
+  geom_line(aes(group = group, linetype = group), linewidth = 0.8, alpha = 0.7) +
+  geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val), 
+                width = 2, linewidth = 0.6) +
+  geom_point(aes(shape = group, size = group)) +
+  scale_color_manual(
+    values = color_3group
+  ) +
+  scale_size_manual(
+    values = c("Control" = 3, "SCI" = 2.5, "TBI" = 2.5)
+  ) +
+  scale_shape_manual(
+    values = c("Control" = 2, "SCI" = 16, "TBI" = 16)
+  ) +
+  scale_linetype_manual(
+    values = c("Control" = "solid", "SCI" = "solid", "TBI" = "dashed")
+  ) +
+  guides(
+    size = "none",
+    shape = "none",
+    linetype = "none"
+  ) +
+  labs(
+    title = NULL, # "Serum BD-Tau: Control vs. SCI vs. TBI",
+    x = "Hours Post-Injury",
+    y = "Serum BD-Tau (pg/mL)",
+    color = "Group",
+    linetype = "Group"
+  ) +
+  scale_x_continuous(breaks = seq(0, 144, by = 24)) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 13)
+  )
+
+tp_annot <- tp_pvals_3group %>%
+  mutate(
+    p_star = case_when(
+      p_adj < 1e-4 ~ "****",
+      p_adj < 1e-3 ~ "***",
+      p_adj < 1e-2 ~ "**",
+      p_adj < 5e-2 ~ "*",
+      TRUE ~ "ns"
+    ),
+    n_label = paste0("SCI n=", n_SCI, "\nTBI n=", n_TBI)
+  )
+
+y_star_pos <- summary_3group %>%
+  group_by(time_hours) %>%
+  summarise(y = max(mean_val + se_val, na.rm = TRUE), .groups = "drop")
+
+tp_annot <- tp_annot %>%
+  left_join(y_star_pos, by = "time_hours") %>%
+  mutate(
+    y_star = y + 0.08 * diff(range(summary_3group$mean_val, na.rm = TRUE))
+  )
+
+p_serum_3group_annot <- p_serum_3group +
+  # FDR-adjusted p-value stars
+  geom_text(
+    data = tp_annot,
+    aes(x = time_hours, y = y_star, label = p_star),
+    inherit.aes = FALSE,
+    size = 4,
+    vjust = 0
+  )
+
+# ============================================
+# PANEL B: Control vs. Subgroups
+# ============================================
+
+dd_subgroup <- serum_cleaned %>% 
+  mutate(time_since_baseline = as.numeric(time_since_baseline)) %>%
+  filter(time_since_baseline <= 12) %>%
+  filter(!is.na(Cohort_Subgroup))
+
+# Prepare plot data
+plot_data_subgroup <- dd_subgroup %>%
+  filter(!is.na(time_since_baseline), !is.na(serum_BDTau)) %>%
+  mutate(
+    group = Cohort_Subgroup,
+    time_hours = as.numeric(as.character(time_since_baseline)) * 12,
+    subject = as.factor(Subject.ID)
+  )
+
+# Summarize mean ± SE
+summary_subgroup <- plot_data_subgroup %>%
+  group_by(group, time_hours) %>%
+  summarise(
+    n = dplyr::n(),
+    mean_val = base::mean(serum_BDTau, na.rm = TRUE), 
+    sd_val = stats::sd(serum_BDTau, na.rm = TRUE), 
+    .groups = "drop"
+  ) %>%
+  mutate(se_val = sd_val / sqrt(n))
+
+# Count unique subjects per group
+group_counts_subgroup <- plot_data_subgroup %>%
+  dplyr::select(Subject.ID, group) %>%
+  distinct() %>%
+  count(group) %>%
+  mutate(label = paste0(group, " (N=", n, ")"))
+
+# Mixed-effects model for statistics - EXCLUDE CONTROL
+plot_data_subgroup_no_control <- plot_data_subgroup %>%
+  filter(group != "Control")
+
+lmm_subgroup <- lmer(serum_log2_BDTau ~ group * time_hours + (1 | subject), 
+                     data = plot_data_subgroup_no_control)
+anova_subgroup <- anova(lmm_subgroup)
+
+cat("\n=== PANEL B: SUBGROUP MODEL (EXCLUDING CONTROL) ===\n")
+print(anova_subgroup)
+cat("\n")
+
+# Per-timepoint statistics - EXCLUDE CONTROL
+library(dplyr)
+library(tidyr)
+
+tp_pvals_subgroup <- plot_data_subgroup_no_control %>%
+  filter(!is.na(time_hours), !is.na(group), !is.na(serum_log2_BDTau)) %>%
+  group_by(time_hours) %>%
+  group_modify(~{
+    dat <- .x
+    
+    # n per group at this timepoint
+    n_by_group <- dat %>%
+      count(group, name = "n") %>%
+      mutate(group = as.character(group)) %>%
+      pivot_wider(names_from = group, values_from = n, names_prefix = "n_")
+    
+    # need >=2 groups present
+    if (n_distinct(dat$group) < 2) {
+      out <- tibble(p = NA_real_, test = "kruskal")
+    } else {
+      out <- tibble(
+        p = kruskal.test(serum_log2_BDTau ~ group, data = dat)$p.value,
+        test = "kruskal"
+      )
+    }
+    
+    bind_cols(out, n_by_group)
+  }) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p, method = "BH"))
+
+library(dplyr)
+library(tidyr)
+
+tp_pvals_severe_vs_ASCI <- plot_data_subgroup_no_control %>%
+  filter(
+    group %in% c("Severe TBI", "A SCI"),
+    !is.na(time_hours),
+    !is.na(serum_log2_BDTau)
+  ) %>%
+  group_by(time_hours) %>%
+  group_modify(~{
+    dat <- .x
+    
+    n_severe <- sum(dat$group == "Severe TBI")
+    n_asci   <- sum(dat$group == "A SCI")
+    
+    # need both groups present
+    if (n_severe == 0 || n_asci == 0) {
+      tibble(
+        p = NA_real_,
+        test = "wilcox",
+        n_Severe_TBI = n_severe,
+        n_A_SCI = n_asci
+      )
+    } else {
+      tibble(
+        p = wilcox.test(
+          serum_log2_BDTau ~ group,
+          data = dat,
+          exact = FALSE
+        )$p.value,
+        test = "wilcox",
+        n_Severe_TBI = n_severe,
+        n_A_SCI = n_asci
+      )
+    }
+  }) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p, method = "BH"))
+
+# Create plot - NO STATISTICS
+p_serum_subgroup <- ggplot(summary_subgroup, aes(x = time_hours, y = mean_val, color = group)) +
+  geom_line(aes(group = group, linetype = group), linewidth = 0.8, alpha = 0.7) +
+  geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val), 
+                width = 2, linewidth = 0.6) +
+  geom_point(aes(size = group, shape = group)) +
+  scale_color_manual(
+    values = color_subgroup
+  ) +
+  scale_shape_manual(
+    values = c("Control" = 2, "A SCI" = 16, "B SCI" = 16, "C/D SCI" = 16,
+               "Moderate TBI" = 16, "Severe TBI" = 16)
+  ) +
+  scale_size_manual(
+    values = c("Control" = 3, "A SCI" = 2.5, "B SCI" = 2.5, "C/D SCI" = 2.5,
+               "Moderate TBI" = 2.5, "Severe TBI" = 2.5)
+  ) +
+  scale_linetype_manual(
+    values = c("Control" = "solid", 
+               "A SCI" = "solid", "B SCI" = "solid", "C/D SCI" = "solid",
+               "Moderate TBI" = "dashed", "Severe TBI" = "dashed")
+  ) +
+  labs(
+    title = NULL, # "Serum BD-Tau: Control vs. Subgroups",
+    x = "Hours Post-Injury",
+    y = "Serum BD-Tau (pg/mL)",
+    color = "Group",
+    linetype = "Group"
+  ) +
+  guides(
+    size = "none",
+    shape = "none",
+    linetype = "none"
+  ) +
+  scale_x_continuous(breaks = seq(0, 144, by = 24)) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 13)
+  )
+
+tp_annot <- tp_pvals_severe_vs_ASCI %>%
+  mutate(
+    p_star = case_when(
+      p_adj < 1e-4 ~ "****",
+      p_adj < 1e-3 ~ "***",
+      p_adj < 1e-2 ~ "**",
+      p_adj < 5e-2 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+y_star_pos <- summary_3group %>%
+  group_by(time_hours) %>%
+  summarise(y = max(mean_val + se_val, na.rm = TRUE), .groups = "drop")
+
+tp_annot <- tp_annot %>%
+  left_join(y_star_pos, by = "time_hours") %>%
+  mutate(
+    y_star = y + 0.08 * diff(range(summary_3group$mean_val, na.rm = TRUE))
+  )
+
+p_serum_subgroup_annot <- p_serum_subgroup +
+  # FDR-adjusted p-value stars
+  geom_text(
+    data = tp_annot,
+    aes(x = time_hours, y = y_star, label = p_star),
+    inherit.aes = FALSE,
+    size = 4,
+    vjust = 0
+  ) 
+
+# ============================================
+# COMBINE PLOTS - 2-PANEL LAYOUT
+# ============================================
+
+fig_serum_combined <- p_serum_3group_annot +
+  ggtitle(NULL)+ 
+  p_serum_subgroup_annot +
+  ggtitle(NULL) +
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    # tag_levels = 'A',
+    title = NULL,
+    theme = theme(
+      plot.tag = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 15, face = "bold", hjust = 0.5)
+    )
+  )
+
+# Display
+print(fig_serum_combined)
+
+library(writexl)
+
+# Prepare ANOVA results as data frames
+anova_3group_df <- as.data.frame(anova_3group) %>%
+  tibble::rownames_to_column("Term") %>%
+  mutate(Analysis = "Panel A: 3-group (SCI vs TBI, Control excluded)")
+
+anova_subgroup_df <- as.data.frame(anova_subgroup) %>%
+  tibble::rownames_to_column("Term") %>%
+  mutate(Analysis = "Panel B: Subgroups (Control excluded)")
+
+# Combine all statistics
+all_statistics <- list(
+  # Summary statistics (INCLUDING Control for display)
+  "PanelA_3group_Summary" = summary_3group,
+  "PanelB_Subgroup_Summary" = summary_subgroup,
+  
+  # Per-timepoint p-values (EXCLUDING Control)
+  "PanelA_Timepoint_Pvals" = tp_pvals_3group %>%
+    mutate(Note = "SCI vs TBI only, Control excluded"),
+  "PanelB_Timepoint_Pvals" = tp_pvals_subgroup %>%
+    mutate(Note = "Among subgroups only, Control excluded"),
+  
+  # Mixed-effects model ANOVA results (EXCLUDING Control)
+  "PanelA_ANOVA" = anova_3group_df,
+  "PanelB_ANOVA" = anova_subgroup_df,
+  
+  # Sample sizes
+  "Sample_Sizes" = bind_rows(
+    group_counts_3group %>% mutate(Panel = "A: 3-group"),
+    group_counts_subgroup %>% mutate(Panel = "B: Subgroups")
+  )
+)
+
+```
+
+```{r supplementary table 4}
+
+## ============================================================
+## Serum BD-Tau Longitudinal Trajectory: Favorable vs Unfavorable GOS (3 months)
+##
+## Compares serum BD-Tau trajectories (log2 scale) between subjects with
+## Favorable vs Unfavorable outcome (GOS at 3 months), with Controls shown
+## for visual reference only (excluded from statistical models).
+##
+## Inputs (expected in the calling environment / project data folder):
+##   - tbi_serum_demo             : long-format serum data per subject/timepoint
+##   - tbi_serum_demo_BL_cleaned  : subject IDs with valid baseline data
+##   - cntr                       : control subject data
+##
+## Outputs:
+##   - <results_path>/serum_3mo_GOS_pairwise_analysis.xlsx
+##   - <figures_path>/serum_bdtau_by_GOS_fav_vs_unfav_3mo.pdf
+## ============================================================
+
+library(mgcv)
+library(knitr)
+library(kableExtra)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(tidyr)
+library(purrr)
+library(writexl)
+
+outcome_col <- "GOS_03"
+time_col <- "time_since_baseline"
+y_col <- "mean_serum_BDTau"
+log_y_col <- "mean_serum_log2_BDTau"
+
+outcome_colors <- c(
+  "Control" = "grey50",
+  "Favorable" = "#3594cc",
+  "Unfavorable" = "#ea801c"
+)
+
+outcome_linetypes <- c(
+  "Control" = "solid",
+  "Favorable" = "solid",
+  "Unfavorable" = "dotdash"
+)
+
+# ------------------------------------------------------------
+# Prepare data
+# ------------------------------------------------------------
+
+serum_cleaned <- tbi_serum_demo %>%
+  filter(Subject.ID %in% tbi_serum_demo_BL_cleaned$Subject.ID) %>%
+  mutate(serum_First_Digit_24Hr = trunc(serum_First_Digit_12Hr / 2)) %>%
+  group_by(Subject.ID) %>%
+  mutate(time_since_baseline = serum_First_Digit_12Hr - min(serum_First_Digit_12Hr, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(!is.na(baseline_time))
+
+# Add control group (treated as time 0 for plotting reference)
+cntr_ref <- cntr %>%
+  mutate(time_since_baseline = 0, GOS_03 = "Control")
+
+intersect_vars <- intersect(colnames(cntr_ref), colnames(serum_cleaned))
+
+dd <- bind_rows(
+  serum_cleaned %>% dplyr::select(all_of(intersect_vars)) %>% filter(time_since_baseline <= 12),
+  cntr_ref %>% dplyr::select(all_of(intersect_vars))
+)
+
+stopifnot(all(c("Subject.ID", time_col, y_col, log_y_col, outcome_col) %in% names(dd)))
+
+plot_data <- data.frame(
+  Subject.ID = dd$Subject.ID,
+  group_raw = dplyr::recode(dd[[outcome_col]], "Dead" = "Deceased"),
+  time = as.numeric(dd[[time_col]]),
+  time_hours = as.numeric(dd[[time_col]]) * 12,
+  y_raw = dd[[y_col]],
+  y_log2 = dd[[log_y_col]],
+  stringsAsFactors = FALSE
+) %>%
+  filter(
+    !is.na(group_raw), group_raw %in% c("Control", "Favorable", "Unfavorable"),
+    !is.na(time), !is.na(y_raw), !is.na(y_log2)
+  ) %>%
+  mutate(
+    group = factor(group_raw, levels = c("Control", "Favorable", "Unfavorable")),
+    subject = factor(Subject.ID)
+  )
+
+# Mixed effects model (Favorable vs Unfavorable only; Control excluded)
+
+plot_data_model <- plot_data %>%
+  filter(group != "Control") %>%
+  mutate(group = factor(group, levels = c("Favorable", "Unfavorable")))
+
+interaction_p <- NA_real_
+
+if (nrow(plot_data_model) >= 10 && dplyr::n_distinct(plot_data_model$group) >= 2) {
+  
+  lmm <- lmerTest::lmer(y_log2 ~ group * time + (1 | subject), data = plot_data_model)
+  coef_table <- summary(lmm)$coefficients
+  
+  if ("groupUnfavorable:time" %in% rownames(coef_table)) {
+    interaction_p <- coef_table["groupUnfavorable:time", "Pr(>|t|)"]
+  }
+  
+  message("Group x time interaction p = ", format.pval(interaction_p, digits = 4))
+}
+
+n_favorable   <- sum(plot_data_model$group == "Favorable", na.rm = TRUE)
+n_unfavorable <- sum(plot_data_model$group == "Unfavorable", na.rm = TRUE)
+
+# Per-timepoint pairwise comparisons (Wilcoxon on log2 scale, BH-adjusted)
+
+all_groups <- c("Control", "Favorable", "Unfavorable")
+pairwise_comparisons <- combn(all_groups, 2, simplify = FALSE)
+unique_times <- sort(unique(plot_data$time_hours))
+
+pairwise_results <- map_dfr(unique_times, function(time_pt) {
+  
+  time_data <- plot_data %>% filter(time_hours == time_pt)
+  
+  map_dfr(pairwise_comparisons, function(pair) {
+    
+    data1 <- time_data$y_log2[time_data$group == pair[1]]
+    data2 <- time_data$y_log2[time_data$group == pair[2]]
+    n1 <- length(data1); n2 <- length(data2)
+    
+    if (n1 >= 2 && n2 >= 2) {
+      test_result <- try(wilcox.test(data1, data2, exact = FALSE), silent = TRUE)
+      p_val <- if (inherits(test_result, "try-error")) NA_real_ else test_result$p.value
+      test_stat <- if (inherits(test_result, "try-error")) NA_real_ else unname(test_result$statistic)
+    } else {
+      p_val <- NA_real_
+      test_stat <- NA_real_
+    }
+    
+    tibble(
+      time_hours = time_pt,
+      group1 = pair[1], group2 = pair[2],
+      n1 = n1, n2 = n2,
+      test_statistic = test_stat,
+      p_raw = p_val,
+      comparison = paste0(pair[1], " vs ", pair[2])
+    )
+  })
+}) %>%
+  group_by(group1, group2) %>%
+  mutate(
+    p_adj = p.adjust(p_raw, method = "BH"),
+    sig_adj = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ "ns"
+    )
+  ) %>%
+  ungroup()
+
+# Save statistical results
+
+interaction_summary <- tibble(
+  GOS_Timepoint = "3 months",
+  N_Favorable = n_favorable,
+  N_Unfavorable = n_unfavorable,
+  Interaction_FavVsUnfav_p = interaction_p
+)
+
+# Visualization 
+
+summary_df <- plot_data %>%
+  group_by(group, time_hours) %>%
+  dplyr::summarise(
+    n = n(),
+    mean_val = mean(y_raw, na.rm = TRUE),
+    se_val = sd(y_raw, na.rm = TRUE) / sqrt(n),
+    .groups = "drop"
+  )
+
+sig_markers <- pairwise_results %>%
+  filter(group1 == "Favorable", group2 == "Unfavorable", sig_adj != "ns") %>%
+  select(time_hours, sig_adj)
+
+y_star <- max(summary_df$mean_val + summary_df$se_val, na.rm = TRUE) * 1.10
+
+serum_plot <- ggplot(summary_df, aes(x = time_hours, y = mean_val, color = group)) +
+  geom_line(aes(group = group, linetype = group), linewidth = 0.8, alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+                width = 2, linewidth = 0.6, alpha = 0.3) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = outcome_colors, name = NULL) +
+  scale_linetype_manual(values = outcome_linetypes, guide = "none") +
+  geom_text(
+    data = sig_markers,
+    aes(x = time_hours, y = y_star, label = sig_adj),
+    inherit.aes = FALSE, size = 5, fontface = "bold", color = "black"
+  ) +
+  labs(title = "3 months", x = "Hours Post-Injury", y = "Serum BD-Tau (pg/mL)") +
+  scale_x_continuous(breaks = seq(0, 144, by = 24)) +
+  theme_classic(base_size = 11) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 8)
+  )
+
+print(serum_plot)
+
+```

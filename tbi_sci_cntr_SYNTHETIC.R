@@ -41,7 +41,9 @@ real_obj_names <- c(
   "tbi_csf", "tbi_csf_demo", "tbi_serum", "tbi_serum_demo", "tbi_demo",
   ls()[grepl("_cleaned", ls())]
 )
+
 # keep only those actually present now, so the script is standalone-safe
+
 real_obj_names <- real_obj_names[vapply(real_obj_names, exists, logical(1))]
 
 if (length(real_obj_names)) {
@@ -77,10 +79,12 @@ set.seed(42)
 ## ============================================================================
 
 ## 0. CONFIG  (tune subject counts / visit counts / magnitudes here) ----------
+
 cfg <- list(
   n_control = 22,
   n_sci = 57,
   n_tbi = 298,
+  n_mild_tbi = 40,
   tbi_severe_frac = 0.72,
   
   visits_sci_csf = function(n) pmax(1L, rpois(n, 4)),
@@ -91,6 +95,7 @@ cfg <- list(
   bdtau = list(
     Control = list(serum = c(med =   6, sd = 0.5)),
     SCI = list(serum = c(med =  40, sd = 0.8), csf = c(med = 1100, sd = 0.9)),
+    `Mild TBI` = list(serum = c(med =  35, sd = 0.7)),
     `Moderate TBI` = list(serum = c(med =  70, sd = 0.8), csf = c(med = 3000, sd = 0.9)),
     `Severe TBI` = list(serum = c(med = 120, sd = 0.8), csf = c(med = 8000, sd = 0.9))
   ),
@@ -135,7 +140,7 @@ draw_traj <- function(n_visits, med, sd, decay) {
 sci_loc <- c("C4","C5","C6","T4","T6","T10","L1", NA)
 sci_locgrp <- c(C4="Cervical",C5="Cervical",C6="Cervical",
                 T4="Thoracic",T6="Thoracic",T10="Thoracic",L1="Lumbar")
-asia_levels <- c("A","B","C/D", NA)
+asia_levels <- c("A","B","C","D", NA)
 
 sci_subjects <- tibble(
   Subject.ID = sprintf("CP%03d", 4:(4 + cfg$n_sci - 1)),
@@ -154,26 +159,32 @@ sci_subjects <- tibble(
 
 gcs_group <- function(g) cut(g, c(0,2,4,8,12,15),
                              labels = c("GCS 1-2","GCS 3-4","GCS 5-8","GCS 9-12","GCS 13-15"))
-n_sev <- round(cfg$n_tbi * cfg$tbi_severe_frac)
+n_mild <- cfg$n_mild_tbi
+n_non_mild <- cfg$n_tbi - n_mild
+n_sev <- round(n_non_mild * cfg$tbi_severe_frac)
+n_mod <- n_non_mild - n_sev
 tbi_subjects <- tibble(
   Subject.ID = as.character(1000:(1000 + cfg$n_tbi - 1)),
   Study = "BTRC",
-  Group  = c(rep("Severe", n_sev), rep("Moderate", cfg$n_tbi - n_sev)),
-  Cohort = c(rep("Severe TBI", n_sev), rep("Moderate TBI", cfg$n_tbi - n_sev)),
+  Group  = c(rep("Severe", n_sev), rep("Moderate", n_mod), rep("Mild", n_mild)),
+  Cohort = c(rep("Severe TBI", n_sev), rep("Moderate TBI", n_mod), rep("Mild TBI", n_mild)),
   Age = round(rnorm(cfg$n_tbi, 42, 18)) %>% pmin(90) %>% pmax(16),
   Sex = sample(c("Male","Female"), cfg$n_tbi, TRUE, c(.72,.28)),
-  GCS = c(sample(3:8, n_sev, TRUE), sample(9:12, cfg$n_tbi - n_sev, TRUE)),
+  GCS = c(sample(3:8, n_sev, TRUE), sample(9:12, n_mod, TRUE), sample(13:15, n_mild, TRUE)),
   GOSE_01 = NA, Note_from_Email = NA
 ) %>%
   mutate(GCS_Group = as.character(gcs_group(GCS)),
          Age_40_Recode = recode_age(Age, 40),
          Age_65_Recode = recode_age(Age, 65),
-         .dead = sample(c(TRUE, FALSE), cfg$n_tbi, TRUE, c(.3,.7)))
+         .unfavorable = sample(c(TRUE, FALSE), cfg$n_tbi, TRUE, c(.35,.65)))
 
-for (col in c("GOS_03","GOS_06","GOS_12","GOS_24","Death_03","Death_06","Death_12","Death_24"))
-  tbi_subjects[[col]] <- ifelse(tbi_subjects$.dead, "Dead",
-                                sample(c("Survived", NA), cfg$n_tbi, TRUE, c(.7,.3)))
-tbi_subjects$.dead <- NULL
+for (col in c("GOS_03","GOS_06","GOS_12","GOS_24"))
+  tbi_subjects[[col]] <- ifelse(tbi_subjects$.unfavorable, "Unfavorable",
+                                sample(c("Favorable", NA), cfg$n_tbi, TRUE, c(.85,.15)))
+for (col in c("Death_03","Death_06","Death_12","Death_24"))
+  tbi_subjects[[col]] <- ifelse(tbi_subjects$.unfavorable & runif(cfg$n_tbi) < .35, "Dead",
+                                sample(c("Survived", NA), cfg$n_tbi, TRUE, c(.85,.15)))
+tbi_subjects$.unfavorable <- NULL
 
 ctrl_subjects <- tibble(
   Study = "CTE Internal", Group = "Controls", Cohort = "Control",
@@ -203,7 +214,7 @@ make_long <- function(subjects, pfx, n_visits_fun, visit_fmt) {
 
 fmt_sci_csf <- function(id, k) sprintf("%s.C%02d%s", id, k, sample(LETTERS, length(k), TRUE))
 fmt_sci_serum <- function(id, k) sprintf("%s.S%02d%s", id, k, sample(LETTERS, length(k), TRUE))
-fmt_tbi <- function(id, k) as.numeric(sprintf("%s.%02d", id, k))
+fmt_tbi <- function(id, k) sprintf("%s.%02d", id, k)
 
 sci_csf_long <- make_long(sci_subjects, "csf", cfg$visits_sci_csf, fmt_sci_csf)
 sci_serum_long <- make_long(sci_subjects, "serum", cfg$visits_sci_serum, fmt_sci_serum)
@@ -278,7 +289,7 @@ serum_base_all <- bind_rows(
                                               serum_BDTau, serum_log2_BDTau, mean_serum_BDTau,
                                               mean_serum_log2_BDTau, Cohort, Age_40_Recode, Age_65_Recode))
 serum_baseline_cleaned <- serum_base_all %>%
-  mutate(Cohort = factor(Cohort, levels = c("Control","SCI","Moderate TBI","Severe TBI","Other")),
+  mutate(Cohort = factor(Cohort, levels = c("Control","SCI","Mild TBI","Moderate TBI","Severe TBI","Other")),
          Cohort2 = factor(case_when(Cohort == "Control" ~ "Control",
                                     Cohort == "SCI" ~ "SCI", TRUE ~ "TBI"),
                           levels = c("Control","SCI","TBI"))) %>% as.data.frame()
@@ -319,10 +330,202 @@ tbi_serum_demo_BL_cleaned <- as.data.frame(baseline_rows(tbi_serum_demo))
 sci_match_demo_BL_cleaned <- as.data.frame(make_match(sci_csf_demo, sci_serum_demo))
 tbi_match_demo_BL_cleaned <- as.data.frame(make_match(tbi_csf_demo, tbi_serum_demo))
 
-## 6. SANITY CHECKS + SAVE ----------------------------------------------------
+## 6. SYNTHETIC N4PD COMPARISON DATA ------------------------------------------
+
+make_n4pd_rows <- function(df, id_col = "Subject.ID", specimen_col = "Subject.Visit") {
+  cohort_multiplier <- case_when(
+    df$Cohort == "Control" ~ 0.55,
+    df$Cohort == "SCI" ~ 0.85,
+    df$Cohort == "Mild TBI" ~ 0.95,
+    df$Cohort == "Moderate TBI" ~ 1.15,
+    df$Cohort == "Severe TBI" ~ 1.45,
+    TRUE ~ 1
+  )
+  tibble(
+    !!id_col := as.character(df$Subject.ID),
+    !!specimen_col := df$Subject.Visit,
+    `Time From Injury` = suppressWarnings(as.numeric(df$serum_Raw_Day_Value * 24)),
+    `BD-tau (pg/ml)` = round(df$serum_BDTau * rlnorm(nrow(df), 0, 0.08), 3),
+    `BD-tau_N4PD` = round(df$serum_BDTau * rlnorm(nrow(df), log(1.05), 0.12), 3),
+    GFAP_N4PD = round(40 * cohort_multiplier * rlnorm(nrow(df), 0, 0.7), 3),
+    NfL_N4PD = round(18 * cohort_multiplier * rlnorm(nrow(df), 0, 0.65), 3),
+    `UCH-L1_N4PD` = round(28 * cohort_multiplier * rlnorm(nrow(df), 0, 0.75), 3)
+  )
+}
+
+write_synthetic_n4pd <- function(path) {
+  if (!requireNamespace("openxlsx", quietly = TRUE)) {
+    warning("Package 'openxlsx' is not installed; skipping synthetic N4PD workbook.")
+    return(invisible(FALSE))
+  }
+  
+  severe_sheet <- tbi_serum_demo %>%
+    filter(Cohort == "Severe TBI") %>%
+    make_n4pd_rows(id_col = "Subject ID", specimen_col = "Specimen ID")
+  
+  sci_sheet <- sci_serum_demo %>%
+    make_n4pd_rows(id_col = "Participant ID", specimen_col = "Specimen ID")
+  
+  mild_control_sheet <- bind_rows(
+    tbi_serum_demo %>%
+      filter(Cohort == "Mild TBI") %>%
+      transmute(Subject.ID, Subject.Visit = as.character(Subject.Visit), Cohort,
+                serum_Raw_Day_Value, serum_BDTau),
+    cntr_cleaned %>%
+      transmute(Subject.ID, Subject.Visit = as.character(Subject.Visit), Cohort,
+                serum_Raw_Day_Value, serum_BDTau)
+  ) %>%
+    make_n4pd_rows(id_col = "Subject ID", specimen_col = "Current Label") %>%
+    mutate(
+      Group = case_when(
+        `Subject ID` %in% cntr_cleaned$Subject.ID ~ "Controls",
+        TRUE ~ "Mild"
+      ),
+      `BD-tau_June2025` = `BD-tau (pg/ml)`
+    ) %>%
+    select(`Subject ID`, Group, `Current Label`, `BD-tau_June2025`,
+           `BD-tau_N4PD`, GFAP_N4PD, NfL_N4PD, `UCH-L1_N4PD`)
+  
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  openxlsx::write.xlsx(
+    list(
+      Severe_TBI = severe_sheet,
+      SCI = sci_sheet,
+      Mild_TBI_Control = mild_control_sheet
+    ),
+    file = path,
+    overwrite = TRUE
+  )
+  invisible(TRUE)
+}
+
+synthetic_n4pd_path <- file.path("~/Desktop/Projects/2025_05_19_TBI_SCI_BDTau/Raw_Data/N4PD/TBI SCI_N4PD_Results_11212025.xlsx")
+
+make_n4pd_direct <- function(df) {
+  make_n4pd_rows(df) %>%
+    transmute(
+      Subject.ID,
+      Subject.Visit = as.character(Subject.Visit),
+      `BD-tau (pg/ml)`,
+      n4pd_BDtau_conc = `BD-tau_N4PD`,
+      GFAP_N4PD,
+      NfL_N4PD,
+      `UCH-L1_N4PD`
+    )
+}
+
+commercial_bdtau <- bind_rows(
+  tbi_serum_demo %>%
+    dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value),
+  sci_serum_demo %>%
+    dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value),
+  cntr_cleaned %>%
+    dplyr::select(Subject.ID, Subject.Visit, Cohort, Age, Sex, serum_BDTau, serum_Raw_Day_Value)
+) %>%
+  mutate(
+    Subject.ID = as.character(Subject.ID),
+    Subject.Visit = as.character(Subject.Visit)
+  ) %>%
+  filter(!is.na(serum_BDTau)) %>%
+  group_by(Subject.ID, Subject.Visit) %>%
+  arrange(desc(!is.na(serum_Raw_Day_Value)), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  distinct()
+
+n4pd_bdtau <- bind_rows(
+  tbi_serum_demo %>%
+    filter(Cohort %in% c("Mild TBI", "Moderate TBI", "Severe TBI")) %>%
+    make_n4pd_direct(),
+  sci_serum_demo %>%
+    make_n4pd_direct(),
+  cntr_cleaned %>%
+    make_n4pd_direct()
+) %>%
+  distinct()
+
+bdtau_conc <- commercial_bdtau %>%
+  filter(!is.na(serum_BDTau)) %>%
+  dplyr::select(Subject.ID, Subject.Visit, Cohort, Sex, Age, serum_BDTau) %>%
+  inner_join(n4pd_bdtau, by = c("Subject.ID", "Subject.Visit")) %>%
+  distinct()
+
+bdtau_demo <- bdtau_conc %>%
+  group_by(Subject.ID) %>%
+  summarise(
+    Cohort = first(na.omit(Cohort)),
+    Age = first(na.omit(Age)),
+    Sex = first(na.omit(Sex)),
+    .groups = "drop"
+  ) %>%
+  distinct() %>%
+  filter(!is.na(Sex))
+
+bdtau <- bdtau_conc %>%
+  dplyr::select(-Cohort, -Age, -Sex) %>%
+  left_join(bdtau_demo, by = "Subject.ID") %>%
+  filter(!is.na(Sex)) %>%
+  mutate(commercial_BDtau_conc = serum_BDTau) %>%
+  dplyr::select(Subject.ID, Subject.Visit, Cohort, Sex, Age,
+                commercial_BDtau_conc, n4pd_BDtau_conc, GFAP_N4PD, NfL_N4PD, `UCH-L1_N4PD`) %>%
+  mutate(
+    across(where(is.character), stringr::str_squish),
+    across(where(is.numeric), ~ round(.x, 6))
+  ) %>%
+  distinct()
+
+dup_ids <- bdtau$Subject.Visit[duplicated(bdtau$Subject.Visit)]
+
+bdtau_clean <- bdtau %>%
+  filter(!(Subject.Visit %in% dup_ids)) %>%
+  filter(!is.na(n4pd_BDtau_conc) & !is.na(`UCH-L1_N4PD`))
+
+n_visits <- bdtau_clean %>%
+  group_by(Subject.ID) %>%
+  summarise(n_visits = n_distinct(Subject.Visit), .groups = "drop")
+
+asia_a_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA == "A", ]$Subject.ID
+asia_b_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA == "B", ]$Subject.ID
+asia_cd_ids <- sci_serum_demo_BL_cleaned[
+  !is.na(sci_serum_demo_BL_cleaned$ASIA) & sci_serum_demo_BL_cleaned$ASIA %in% c("C","D"), ]$Subject.ID
+
+bdtau_conc_baseline <- bdtau_clean %>%
+  filter(!is.na(commercial_BDtau_conc), !is.na(n4pd_BDtau_conc)) %>%
+  group_by(Subject.ID) %>%
+  arrange(stringr::str_order(Subject.Visit, numeric = TRUE), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  left_join(n_visits, by = "Subject.ID") %>%
+  mutate(
+    Cohort2 = factor(case_when(
+      Cohort %in% c("Mild TBI", "Moderate TBI", "Severe TBI", "TBI") ~ "TBI",
+      Cohort == "SCI" ~ "SCI",
+      Cohort == "Control" ~ "Control",
+      TRUE ~ NA_character_
+    ), levels = c("Control", "SCI", "TBI")),
+    n4pd_BDtau_conc = suppressWarnings(as.numeric(n4pd_BDtau_conc)),
+    GFAP_N4PD = suppressWarnings(as.numeric(GFAP_N4PD)),
+    NfL_N4PD = suppressWarnings(as.numeric(NfL_N4PD)),
+    `UCH-L1_N4PD` = suppressWarnings(as.numeric(`UCH-L1_N4PD`)),
+    Cohort3 = case_when(
+      Subject.ID %in% asia_a_ids ~ "A SCI",
+      Subject.ID %in% asia_b_ids ~ "B SCI",
+      Subject.ID %in% asia_cd_ids ~ "C/D SCI",
+      TRUE ~ Cohort
+    )
+  )
+
+bdtau_conc_baseline_roc <- bdtau_conc_baseline %>%
+  rename(UCH_L1_N4PD = `UCH-L1_N4PD`)
+
+## 7. SANITY CHECKS + SAVE ----------------------------------------------------
 obj_names <- c(
   "cntr","sci_csf","sci_csf_demo","sci_serum","sci_serum_demo","sci_demo",
   "tbi_csf","tbi_csf_demo","tbi_serum","tbi_serum_demo","tbi_demo",
+  "commercial_bdtau", "n4pd_bdtau", "bdtau_conc", "bdtau_demo", "bdtau",
+  "bdtau_clean", "n_visits", "bdtau_conc_baseline", "bdtau_conc_baseline_roc",
   ls()[grepl("_cleaned", ls())])
 
 cat("\n--- dimensions of generated (synthetic) objects ---\n")
@@ -331,11 +534,16 @@ print(purrr::map_dfr(obj_names, ~tibble(object = .x, nrow = nrow(get(.x)), ncol 
 stopifnot(
   with(sci_serum, all.equal(serum_log2_BDTau, log2(serum_BDTau))),
   with(sci_csf,   all.equal(mean_csf_log2_BDTau, log2(mean_csf_BDTau))),
-  with(match_baseline_cleaned, all.equal(mean_BDTau_Ratio, mean_serum_BDTau / mean_csf_BDTau)))
+  with(match_baseline_cleaned, all.equal(mean_BDTau_Ratio, mean_serum_BDTau / mean_csf_BDTau)),
+  all(c("Control", "SCI", "Mild TBI", "Moderate TBI", "Severe TBI") %in%
+        unique(as.character(bdtau_conc_baseline$Cohort))))
 cat("\nAll internal-consistency invariants hold.\n")
 
 save(list = obj_names, file = file.path(processed_data_path, "tbi_sci_cntr_SYNTHETIC.RData"))
 cat("\nSaved -> ", file.path(processed_data_path, "tbi_sci_cntr_SYNTHETIC.RData"), "\n")
+
+if (write_synthetic_n4pd(synthetic_n4pd_path))
+  cat("Saved -> ", synthetic_n4pd_path, "\n")
 
 ## ============================================================================
 ## PART 3 -- VERIFY synthetics vs the SNAPSHOT (names + types). Safe no-op when
